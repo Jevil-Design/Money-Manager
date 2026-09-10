@@ -116,6 +116,25 @@ exceed the limit, and the app will tell you so rather than failing obscurely.
 **Back up to Google Drive instead in that case** — Drive uploads go straight
 from your browser to Google, so no size limit applies.
 
+## Logins are per browser, cloud accounts are per login
+
+Everyone who uses this copy of the app signs in with their own local account,
+and each one has a completely separate database in the browser. That is a
+different thing from the API account:
+
+- **Local account** — who is using the app on this computer. Created on the
+  sign-in screen, stored only in this browser, never sent anywhere.
+- **API account** — where a backup goes. Each local account connects its own,
+  by signing in with Google under Settings → Cloud backup.
+
+So two people sharing a computer keep separate books locally *and* separate
+snapshots on the server, because the API scopes every snapshot to the token
+that pushed it. `ALLOWED_EMAILS` therefore needs every address that should be
+allowed to back up, not just yours.
+
+There is no password reset for a local account: nothing on the server knows
+about it. A forgotten password means restoring from a backup file, so keep one.
+
 ## What is and is not sent
 
 Pushed: accounts, transactions, categories, budgets, recurring entries, bills,

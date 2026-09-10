@@ -343,6 +343,7 @@
 
 <div data-app style="display:flex;flex-direction:column;height:100vh;min-height:560px;background:var(--c-eef3f9);font-family:'Segoe UI',Tahoma,Geneva,sans-serif;font-size:12px;color:var(--c-16232f);overflow:hidden">
 
+  <sc-if value="{{ signedIn }}" hint-placeholder-val="{{ true }}">
   <div style="display:flex;align-items:center;gap:8px;height:28px;padding:0 8px;flex:none;background:linear-gradient(var(--c-5b8cbf),var(--c-2b5f96));border-bottom:1px solid var(--c-1c4470);color:var(--c-onaccent)">
     <div style="width:16px;height:16px;border-radius:2px;background:var(--c-f3f8fd);color:var(--c-1c4470);display:grid;place-items:center;font-size:11px;font-weight:700">₹</div>
     <span style="font-weight:600;letter-spacing:.2px">Money Manager</span>
@@ -355,6 +356,11 @@
     <button onClick="{{ toggleTheme }}" title="{{ themeBtnTitle }}" aria-label="{{ themeBtnTitle }}" style="height:19px;padding:0 8px;border:1px solid var(--c-1c4470);background:linear-gradient(var(--c-eaf2fa),var(--c-cfe0f0));border-radius:2px;cursor:pointer;font-size:11px">{{ themeBtnLabel }}</button>
     <button onClick="{{ doPrint }}" title="Print the current view  (Ctrl+P)" style="height:19px;padding:0 8px;border:1px solid var(--c-1c4470);background:linear-gradient(var(--c-eaf2fa),var(--c-cfe0f0));border-radius:2px;cursor:pointer;font-size:11px">Print</button>
     <button onClick="{{ lock }}" title="Lock the screen  (Ctrl+Shift+L)" style="height:19px;padding:0 8px;border:1px solid var(--c-1c4470);background:linear-gradient(var(--c-eaf2fa),var(--c-cfe0f0));border-radius:2px;cursor:pointer;font-size:11px">Lock</button>
+    <button onClick="{{ goAccount }}" title="{{ whoTitle }}" style="height:19px;padding:0 7px 0 3px;display:flex;align-items:center;gap:5px;border:1px solid var(--c-1c4470);background:linear-gradient(var(--c-eaf2fa),var(--c-cfe0f0));border-radius:2px;cursor:pointer;font-size:11px;max-width:150px">
+      <span style="{{ whoStyle }}">{{ whoInitial }}</span>
+      <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ whoName }}</span>
+    </button>
+    <button onClick="{{ doSignOut }}" title="Sign out and return to the sign-in screen" style="height:19px;padding:0 8px;border:1px solid var(--c-1c4470);background:linear-gradient(var(--c-eaf2fa),var(--c-cfe0f0));border-radius:2px;cursor:pointer;font-size:11px">Sign out</button>
   </div>
 
   <div style="display:flex;align-items:flex-end;gap:2px;height:27px;padding:4px 6px 0;flex:none;background:linear-gradient(var(--c-e2ecf7),var(--c-cfe0f0));border-bottom:1px solid var(--c-9db8d2)">
@@ -733,6 +739,40 @@
 
           <div style="flex:1;min-width:0;overflow:auto;padding:8px;display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:8px;align-content:start">
 
+            <sc-if value="{{ isSetAccount }}">
+              <div style="border:1px solid var(--c-a8c0d8);background:var(--c-surface)">
+                <div style="padding:4px 8px;background:linear-gradient(var(--c-eaf2fa),var(--c-dbe8f5));border-bottom:1px solid var(--c-bcd0e4);font-weight:700;color:var(--c-1c4470)">Signed in</div>
+                <div style="padding:10px;display:flex;align-items:center;gap:10px;border-bottom:1px solid var(--c-eaf0f7)">
+                  <span style="{{ acctAvatarStyle }}">{{ acctInitial }}</span>
+                  <div style="flex:1;min-width:0">
+                    <div style="font-weight:700;color:var(--c-16232f)">{{ acctName }}</div>
+                    <div style="color:var(--c-5b7186);font-size:11px">{{ acctEmail }}</div>
+                  </div>
+                  <span style="{{ acctEncryptStyle }}">{{ acctEncryptLabel }}</span>
+                </div>
+                <div style="padding:8px 10px;color:var(--c-3c5163);border-bottom:1px solid var(--c-eaf0f7)">{{ acctStats }}</div>
+                <div style="padding:8px 10px;display:flex;flex-direction:column;gap:6px">
+                  <button onClick="{{ changePassword }}" style="height:24px;padding:0 10px;border:1px solid var(--c-a8c0d8);background:linear-gradient(var(--c-surface),var(--c-e8f0f8));cursor:pointer;border-radius:2px;text-align:left">Change my password…</button>
+                  <button onClick="{{ toggleEncryption }}" style="height:24px;padding:0 10px;border:1px solid var(--c-a8c0d8);background:linear-gradient(var(--c-surface),var(--c-e8f0f8));cursor:pointer;border-radius:2px;text-align:left">{{ acctEncryptAction }}</button>
+                  <div style="color:var(--c-7b8b9b);font-size:11px">{{ accountSecurityNote }}</div>
+                </div>
+                <div style="padding:8px 10px;display:flex;gap:6px;flex-wrap:wrap;border-top:1px solid var(--c-eaf0f7)">
+                  <button onClick="{{ signOut }}" style="height:24px;padding:0 10px;border:1px solid var(--c-2f7a44);background:linear-gradient(var(--c-63b878),var(--c-3d8f52));color:var(--c-onaccent);font-weight:600;cursor:pointer;border-radius:2px">Sign out</button>
+                  <button onClick="{{ addAccount }}" style="height:24px;padding:0 10px;border:1px solid var(--c-a8c0d8);background:linear-gradient(var(--c-surface),var(--c-e8f0f8));cursor:pointer;border-radius:2px">Add another account…</button>
+                  <div style="flex:1"></div>
+                  <button onClick="{{ deleteAccount }}" style="height:24px;padding:0 10px;border:1px solid var(--c-8c2a24);background:linear-gradient(var(--c-surface),var(--c-f7e4e4));color:var(--c-8c2a24);cursor:pointer;border-radius:2px">Delete this account…</button>
+                </div>
+              </div>
+
+              <div style="border:1px solid var(--c-a8c0d8);background:var(--c-surface)">
+                <div style="padding:4px 8px;background:linear-gradient(var(--c-eaf2fa),var(--c-dbe8f5));border-bottom:1px solid var(--c-bcd0e4);font-weight:700;color:var(--c-1c4470)">How accounts work here</div>
+                <div style="padding:8px 10px;color:var(--c-3c5163);display:flex;flex-direction:column;gap:6px">
+                  <div>{{ accountNote }}</div>
+                  <div style="color:var(--c-7b8b9b);font-size:11px">There are {{ acctOtherCount }} other account(s) on this computer. There is no password reset: if a password is forgotten the way back in is a backup file, so keep one.</div>
+                </div>
+              </div>
+            </sc-if>
+
             <sc-if value="{{ isSetGeneral }}">
               <div style="border:1px solid var(--c-a8c0d8);background:var(--c-surface)">
                 <div style="padding:4px 8px;background:linear-gradient(var(--c-eaf2fa),var(--c-dbe8f5));border-bottom:1px solid var(--c-bcd0e4);font-weight:700;color:var(--c-1c4470)">General &amp; appearance</div>
@@ -1049,6 +1089,90 @@
     <span>Net worth: <b style="font-variant-numeric:tabular-nums">{{ statusNet }}</b></span>
     <span>{{ statusStore }}</span>
   </div>
+  </sc-if>
+
+  <sc-if value="{{ authBooting }}">
+    <div style="position:fixed;inset:0;display:grid;place-items:center;background:var(--c-eef3f9);z-index:95;color:var(--c-5b7186)">Opening your books…</div>
+  </sc-if>
+
+  <sc-if value="{{ needsAuth }}">
+    <div style="position:fixed;inset:0;z-index:96;background:linear-gradient(var(--c-2b5f96),var(--c-14416e));display:flex;align-items:center;justify-content:center;padding:20px;overflow:auto">
+      <div style="width:400px;max-width:100%;border:1px solid var(--c-1c4470);background:var(--c-f7fbff);box-shadow:0 12px 34px rgba(12,32,54,.4)">
+
+        <div style="display:flex;align-items:center;gap:8px;height:28px;padding:0 10px;background:linear-gradient(var(--c-5b8cbf),var(--c-2b5f96));color:var(--c-onaccent)">
+          <div style="width:16px;height:16px;border-radius:2px;background:var(--c-f3f8fd);color:var(--c-1c4470);display:grid;place-items:center;font-size:11px;font-weight:700">₹</div>
+          <span style="font-weight:600;letter-spacing:.2px">Money Manager</span>
+        </div>
+
+        <div style="padding:12px 14px 6px">
+          <div style="font-size:15px;font-weight:700;color:var(--c-14416e)">{{ authTitle }}</div>
+          <div style="color:var(--c-3c5163);margin-top:3px">{{ authSubtitle }}</div>
+        </div>
+
+        <sc-if value="{{ hasAuthError }}">
+          <div role="alert" style="margin:0 14px 8px;padding:6px 8px;border:1px solid var(--c-b98a8a);background:var(--c-fdf2f2);color:var(--c-8c2a24)">{{ authError }}</div>
+        </sc-if>
+
+        <sc-if value="{{ isLogin }}">
+          <div style="padding:0 14px 10px">
+            <div style="max-height:190px;overflow:auto;margin-bottom:8px">
+              <sc-for list="{{ authUsers }}" as="u" hint-placeholder-count="2">
+                <button onClick="{{ u.go }}" style="{{ u.style }}">
+                  <span style="{{ u.dotStyle }}">{{ u.initial }}</span>
+                  <span style="{{ u.nameStyle }}">{{ u.name }}</span>
+                  <span style="{{ u.metaStyle }}">{{ u.meta }}</span>
+                </button>
+              </sc-for>
+            </div>
+            <label style="display:block;color:var(--c-3c5163);margin-bottom:3px">Password for {{ authSelectedName }}</label>
+            <input type="password" value="{{ authPassword }}" onChange="{{ onAuthPassword }}" onKeyDown="{{ onAuthKey }}" aria-label="Password" autoFocus="{{ true }}" style="width:100%;height:26px;border:1px solid var(--c-a8c0d8);padding:0 6px;border-radius:2px;background:var(--c-surface)" />
+            <div style="color:var(--c-a3241f);font-size:11px;min-height:14px;margin-top:3px">{{ loginDisabledNote }}</div>
+            <button onClick="{{ doLogin }}" style="width:100%;height:28px;margin-top:4px;border:1px solid var(--c-2f7a44);background:linear-gradient(var(--c-63b878),var(--c-3d8f52));color:var(--c-onaccent);font-weight:600;cursor:pointer;border-radius:2px">{{ loginLabel }}</button>
+            <button onClick="{{ goSignup }}" style="width:100%;height:24px;margin-top:6px;border:1px solid var(--c-a8c0d8);background:linear-gradient(var(--c-surface),var(--c-e8f0f8));cursor:pointer;border-radius:2px">Create another account</button>
+          </div>
+        </sc-if>
+
+        <sc-if value="{{ isSignup }}">
+          <div style="padding:0 14px 10px;display:grid;grid-template-columns:100px 1fr;gap:6px 8px;align-items:center">
+            <label style="text-align:right;color:var(--c-3c5163)">Your name</label>
+            <input value="{{ signupName }}" onChange="{{ onSignupName }}" onKeyDown="{{ onAuthKey }}" aria-label="Your name" autoFocus="{{ true }}" style="height:25px;border:1px solid var(--c-a8c0d8);padding:0 6px;border-radius:2px;background:var(--c-surface);min-width:0" />
+
+            <label style="text-align:right;color:var(--c-3c5163)">Email</label>
+            <input type="email" value="{{ signupEmail }}" onChange="{{ onSignupEmail }}" onKeyDown="{{ onAuthKey }}" placeholder="optional" aria-label="Email" style="height:25px;border:1px solid var(--c-a8c0d8);padding:0 6px;border-radius:2px;background:var(--c-surface);min-width:0" />
+
+            <label style="text-align:right;color:var(--c-3c5163)">Password</label>
+            <input type="password" value="{{ signupPassword }}" onChange="{{ onSignupPassword }}" onKeyDown="{{ onAuthKey }}" aria-label="Password" style="height:25px;border:1px solid var(--c-a8c0d8);padding:0 6px;border-radius:2px;background:var(--c-surface);min-width:0" />
+
+            <label style="text-align:right;color:var(--c-3c5163)">Repeat</label>
+            <input type="password" value="{{ signupPassword2 }}" onChange="{{ onSignupPassword2 }}" onKeyDown="{{ onAuthKey }}" aria-label="Repeat password" style="height:25px;border:1px solid var(--c-a8c0d8);padding:0 6px;border-radius:2px;background:var(--c-surface);min-width:0" />
+
+            <span></span>
+            <span style="color:var(--c-7b8b9b);font-size:11px">{{ passwordHint }}</span>
+
+            <span></span>
+            <label style="display:flex;align-items:flex-start;gap:6px;cursor:pointer;color:var(--c-3c5163)">
+              <input type="checkbox" checked="{{ signupSamples }}" onChange="{{ onSignupSamples }}" style="margin-top:2px" />
+              <span>Start with sample data<br /><span style="color:var(--c-7b8b9b);font-size:11px">{{ samplesNote }}</span></span>
+            </label>
+
+            <span></span>
+            <label style="display:flex;align-items:flex-start;gap:6px;cursor:pointer;color:var(--c-3c5163)">
+              <input type="checkbox" checked="{{ signupEncrypt }}" onChange="{{ onSignupEncrypt }}" disabled="{{ cantEncrypt }}" style="margin-top:2px" />
+              <span>Encrypt my data on this device<br /><span style="color:var(--c-7b8b9b);font-size:11px">{{ encryptNote }}</span></span>
+            </label>
+          </div>
+          <div style="padding:0 14px 10px">
+            <button onClick="{{ doSignup }}" style="width:100%;height:28px;border:1px solid var(--c-2f7a44);background:linear-gradient(var(--c-63b878),var(--c-3d8f52));color:var(--c-onaccent);font-weight:600;cursor:pointer;border-radius:2px">{{ signupLabel }}</button>
+            <sc-if value="{{ canGoLogin }}">
+              <button onClick="{{ goLogin }}" style="width:100%;height:24px;margin-top:6px;border:1px solid var(--c-a8c0d8);background:linear-gradient(var(--c-surface),var(--c-e8f0f8));cursor:pointer;border-radius:2px">Back to sign in</button>
+            </sc-if>
+          </div>
+        </sc-if>
+
+        <div style="padding:7px 14px;border-top:1px solid var(--c-c3d5e6);background:linear-gradient(var(--c-f4f9ff),var(--c-e7f0f9));color:var(--c-7b8b9b);font-size:11px">{{ authFootnote }}</div>
+      </div>
+    </div>
+  </sc-if>
 
   <sc-if value="{{ hasMenu }}">
     <div style="{{ menuStyle }}">
@@ -1433,6 +1557,116 @@ function mmHashPin(pin, salt) {
   return Promise.resolve(('00000000' + h1.toString(16)).slice(-8) + ('00000000' + h2.toString(16)).slice(-8));
 }
 
+/* ---------------------------------------------------------------------------
+   ACCOUNTS
+
+   Each person who uses this copy of the app gets their own login and their own
+   database record; nothing is shared between them.  A password is never stored
+   — only a PBKDF2-SHA256 digest of it and the random salt it was derived with.
+
+   Optionally an account's data is also encrypted at rest with AES-GCM under a
+   key derived from the same password, which is what makes the separation real
+   on a shared computer rather than merely tidy.  That is opt-in because a
+   forgotten password then means the data is genuinely unrecoverable.
+   --------------------------------------------------------------------------- */
+var MM_KDF_ITERS = 210000;                 /* OWASP guidance for PBKDF2-SHA256 */
+var MM_USER_COLOURS = ['#2b5f96', '#3d8f52', '#b23b31', '#6b5aa8', '#b3701c', '#1a6b3c'];
+
+function mmHasSubtle() {
+  try { return !!(crypto && crypto.subtle && window.TextEncoder); } catch (e) { return false; }
+}
+function mmBytesToB64(buf) {
+  var b = new Uint8Array(buf), s = '';
+  for (var i = 0; i < b.length; i++) s += String.fromCharCode(b[i]);
+  return btoa(s);
+}
+function mmB64ToBytes(b64) {
+  var s = atob(String(b64 || '')), a = new Uint8Array(s.length);
+  for (var i = 0; i < s.length; i++) a[i] = s.charCodeAt(i);
+  return a;
+}
+function mmHex(buf) {
+  return Array.prototype.map.call(new Uint8Array(buf), function (b) {
+    return b.toString(16).padStart(2, '0');
+  }).join('');
+}
+/* Raw PBKDF2 bits, used both for the verifier digest and the encryption key. */
+function mmKdfBits(password, saltHex, iters, bits) {
+  return crypto.subtle.importKey('raw', new TextEncoder().encode(String(password)), 'PBKDF2', false, ['deriveBits'])
+    .then(function (base) {
+      return crypto.subtle.deriveBits({
+        name: 'PBKDF2', salt: mmB64ToBytes(saltHex), iterations: iters, hash: 'SHA-256'
+      }, base, bits);
+    });
+}
+/* The stored verifier.  Falls back to the iterated hash used for the PIN when
+   WebCrypto is unavailable — weaker, but the password still is not kept. */
+function mmPasswordHash(password, salt, iters) {
+  if (!mmHasSubtle()) return mmHashPin('pw:' + password, salt).then(function (h) { return { hash: h, algo: 'fallback' }; });
+  return mmKdfBits(password, salt, iters || MM_KDF_ITERS, 256).then(function (bits) {
+    return { hash: mmHex(bits), algo: 'pbkdf2-sha256' };
+  });
+}
+/* An AES-GCM key for the data blob.  Derived with a different info string from
+   the verifier so the stored digest can never be used as the key. */
+function mmDataKey(password, salt, iters) {
+  if (!mmHasSubtle()) return Promise.resolve(null);
+  return mmKdfBits('data|' + password, salt, iters || MM_KDF_ITERS, 256).then(function (bits) {
+    return crypto.subtle.importKey('raw', bits, { name: 'AES-GCM' }, false, ['encrypt', 'decrypt']);
+  });
+}
+function mmEncryptJson(key, obj) {
+  var iv = new Uint8Array(12);
+  crypto.getRandomValues(iv);
+  var data = new TextEncoder().encode(JSON.stringify(obj));
+  return crypto.subtle.encrypt({ name: 'AES-GCM', iv: iv }, key, data).then(function (ct) {
+    return { __enc: 1, v: 1, iv: mmBytesToB64(iv), ct: mmBytesToB64(ct) };
+  });
+}
+function mmDecryptJson(key, rec) {
+  return crypto.subtle.decrypt({ name: 'AES-GCM', iv: mmB64ToBytes(rec.iv) }, key, mmB64ToBytes(rec.ct))
+    .then(function (buf) { return JSON.parse(new TextDecoder().decode(buf)); });
+}
+function mmNewSalt() {
+  try {
+    var a = new Uint8Array(16);
+    crypto.getRandomValues(a);
+    return mmBytesToB64(a);
+  } catch (e) { return btoa(String(Date.now()) + Math.random()); }
+}
+/* Constant-time-ish comparison so a wrong password cannot be probed by timing. */
+function mmSafeEqual(a, b) {
+  a = String(a || ''); b = String(b || '');
+  if (a.length !== b.length) return false;
+  var diff = 0;
+  for (var i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return diff === 0;
+}
+function mmPasswordProblem(pw) {
+  pw = String(pw || '');
+  if (pw.length < 8) return 'Use at least 8 characters.';
+  if (!/[a-zA-Z]/.test(pw)) return 'Include at least one letter.';
+  if (!/[0-9]/.test(pw)) return 'Include at least one number.';
+  if (/^\s|\s$/.test(pw)) return 'Please don’t start or end with a space.';
+  return '';
+}
+
+/* A brand-new account's database: the useful defaults (categories, payment
+   methods, categorisation rules) but none of the demo money. */
+function mmNewUserDb(withSamples) {
+  if (withSamples) return mmSeed();
+  var db = mmSeed();
+  ['accounts', 'txns', 'budgets', 'recurring', 'loans', 'bookmarks', 'bills', 'goals'].forEach(function (k) {
+    db[k] = [];
+  });
+  /* keep the categories and rules, but they are the user's own now */
+  db.categories.forEach(function (c) { c.demo = false; });
+  db.rules.forEach(function (r) { r.demo = false; r.categoryId = r.categoryId || ''; });
+  db.recons = []; db.views = []; db.loanEvents = [];
+  db.settings.demo = false;
+  return db;
+}
+
 /* Gzip a string in the browser.  Serverless hosts cap a request body at a few
    megabytes, and a text-only database of 10,000 transactions is already about
    4.5 MB of JSON — roughly 20x that once compressed.  Returns null when the
@@ -1474,8 +1708,19 @@ class Component extends DCLogic {
       dlg: null, confirm: null, toast: '', toastAction: null, locked: false, report: 'catexp',
       calMonth: mmIso(new Date(today.getFullYear(), today.getMonth(), 1)).slice(0, 7), imp: null,
       dashPeriod: 'This Month', setSection: 'General', lockTries: 0, lockUntil: 0,
-      undoLabel: '', cardId: '', loanId: '', recon: null, ready: false
+      undoLabel: '', cardId: '', loanId: '', recon: null, ready: false,
+      /* Who is signed in, and which of the sign-in screens to show. */
+      auth: {
+        phase: 'boot',            /* boot | signup | login | ready */
+        users: [], selected: '', userId: '', name: '', email: '', colour: '',
+        encrypted: false, guest: false, legacyFound: false,
+        busy: false, error: '', tries: 0, until: 0,
+        form: { name: '', email: '', password: '', password2: '', samples: false, encrypt: false }
+      }
     };
+    this.userId = null;           /* set on sign-in; scopes every stored record */
+    this.dataKey = null;          /* AES key for an encrypted account, memory only */
+    this.adoptedLegacy = false;
     this.gridEl = null; this.searchEl = null; this.saveTimer = null; this.dragCol = null;
     /* Undo journal: snapshots of whole collections taken before destructive
        work.  Kept in memory only — a reload is itself a clean slate. */
@@ -1540,32 +1785,381 @@ class Component extends DCLogic {
     } catch (e) { }
     this.openDb().then(function (db) {
       self.idb = db;
-      return self.readDb();
-    }).then(function (saved) {
-      if (saved) {
-        var migrated = self.migrate(saved);
-        self.bumpRev();
-        self.setState({ db: migrated, store: 'IndexedDB', ready: true }, function () {
-          self.applyTheme();
-          if (migrated.__migrated) self.persist();          /* write the upgraded shape back */
-          self.afterLoad();
-        });
-      } else {
-        self.setState({ store: 'IndexedDB', ready: true }, function () {
-          self.applyTheme();
-          self.persist();
-          self.afterLoad();
-        });
-      }
+      return self.bootAuth();
     }).catch(function () {
-      /* Storage is unavailable (private window, blocked cookies).  The app
-         still works for this session, so set everything else up anyway. */
-      self.setState({ store: 'in-memory (storage blocked)', ready: true }, function () {
+      /* Storage is unavailable (private window, blocked site data).  Accounts
+         cannot exist without it, so run one throwaway session and say so
+         plainly rather than pretending a login means anything. */
+      self.userId = 'guest';
+      self.dataKey = null;
+      /* Leave the seeded sample book in place so there is something to look
+         at; it is clearly labelled as unsaveable in the status bar. */
+      self.setState({
+        store: 'in-memory (storage blocked)', ready: true,
+        auth: Object.assign({}, self.state.auth, {
+          phase: 'ready', userId: 'guest', name: 'Guest', guest: true,
+          colour: MM_USER_COLOURS[4]
+        })
+      }, function () {
         self.applyTheme();
-        self.afterLoad();
+        self.flash('This browser is blocking local storage, so nothing can be saved. Download a backup before you close the tab.');
       });
     });
     this.measure();
+  }
+
+  /* -----------------------------------------------------------------------
+     Boot: decide whether to show the sign-in screen, the create-account
+     screen, or (when the browser cannot store anything) a guest session.
+     ----------------------------------------------------------------------- */
+  bootAuth() {
+    var self = this;
+    return this.listUsers().then(function (users) {
+      return self.idbGet('state', 'app').then(function (legacy) {
+        var lastId = '';
+        try { lastId = localStorage.getItem('mm-last-user') || ''; } catch (e) { }
+        var known = users.filter(function (u) { return u && u.id; });
+        var patch = {
+          store: 'IndexedDB', ready: true,
+          auth: Object.assign({}, self.state.auth, {
+            users: known.map(function (u) {
+              return {
+                id: u.id, name: u.name, email: u.email || '', colour: u.colour || MM_USER_COLOURS[0],
+                encrypted: !!u.encrypted, lastLogin: u.lastLogin || 0
+              };
+            }),
+            selected: known.some(function (u) { return u.id === lastId; }) ? lastId : (known[0] ? known[0].id : ''),
+            phase: known.length ? 'login' : 'signup',
+            legacyFound: !known.length && !!legacy,
+            error: '', busy: false,
+            form: Object.assign({}, self.state.auth.form, { name: '', email: '', password: '', password2: '' })
+          })
+        };
+        self.setState(patch);
+      });
+    });
+  }
+
+  /* Create the first (or an additional) account. */
+  doSignup() {
+    var self = this, a = this.state.auth, f = a.form;
+    if (a.busy) return;
+    var name = String(f.name || '').trim();
+    if (!name) { this.authError('Enter the name you want to be known by.'); return; }
+    if (name.length > 60) { this.authError('That name is a little too long.'); return; }
+    var email = String(f.email || '').trim();
+    if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) { this.authError('That email address doesn’t look right.'); return; }
+    var taken = (a.users || []).some(function (u) {
+      return u.name.toLowerCase() === name.toLowerCase() || (email && (u.email || '').toLowerCase() === email.toLowerCase());
+    });
+    if (taken) { this.authError('There is already an account with that name or email on this computer.'); return; }
+    var problem = mmPasswordProblem(f.password);
+    if (problem) { this.authError(problem); return; }
+    if (f.password !== f.password2) { this.authError('The two passwords don’t match.'); return; }
+    if (f.encrypt && !mmHasSubtle()) { this.authError('This browser cannot encrypt data, so that option is unavailable here.'); return; }
+
+    this.setAuth({ busy: true, error: '' });
+    var salt = mmNewSalt();
+    var id = 'u' + mmUid().slice(1);
+    var adopt = !!a.legacyFound;
+
+    mmPasswordHash(f.password, salt, MM_KDF_ITERS).then(function (v) {
+      return (f.encrypt ? mmDataKey(f.password, salt, MM_KDF_ITERS) : Promise.resolve(null))
+        .then(function (key) {
+          var user = {
+            id: id, name: name, email: email, salt: salt, iters: MM_KDF_ITERS,
+            hash: v.hash, algo: v.algo, encrypted: !!f.encrypt,
+            colour: MM_USER_COLOURS[(a.users || []).length % MM_USER_COLOURS.length],
+            createdAt: Date.now(), lastLogin: Date.now()
+          };
+          /* Adopting the pre-accounts database is what stops the upgrade from
+             looking like data loss to whoever was already using the app. */
+          var loadExisting = adopt
+            ? self.idbGet('state', 'app').then(function (old) { return old ? self.migrate(old) : mmNewUserDb(f.samples); })
+            : Promise.resolve(mmNewUserDb(f.samples));
+
+          return loadExisting.then(function (db) {
+            delete db.__migrated;
+            return self.idbPut('users', user)
+              .then(function () { return self.writeUserData(id, db, key); })
+              .then(function () { return { user: user, db: db, key: key }; });
+          });
+        });
+    }).then(function (r) {
+      if (adopt) self.adoptedLegacy = true;
+      self.enterSession(r.user, r.db, r.key, adopt
+        ? 'Welcome, ' + name + '. Your existing data has been moved into this account.'
+        : 'Account created. Welcome, ' + name + '.');
+      /* The pre-accounts record is a second, unencrypted copy of the same
+         data.  Keep one safety snapshot (which follows this account's
+         encryption setting) and then remove it, so turning encryption on
+         cannot be sidestepped by reading the old key. */
+      if (adopt) {
+        self.snapshot('data from before accounts existed').then(function () {
+          return self.idbDel('state', 'app');
+        }).catch(function () { });
+      }
+    }).catch(function (e) {
+      self.authError('The account could not be created: ' + (e && e.message ? e.message : 'unknown error'));
+    });
+  }
+
+  /* Sign in to an existing account. */
+  doLogin() {
+    var self = this, a = this.state.auth;
+    if (a.busy) return;
+    if ((a.until || 0) > Date.now()) {
+      this.authError('Too many attempts — wait ' + Math.ceil((a.until - Date.now()) / 1000) + ' second(s).');
+      return;
+    }
+    var id = a.selected;
+    var pw = a.form.password || '';
+    if (!id) { this.authError('Choose an account.'); return; }
+    if (!pw) { this.authError('Enter your password.'); return; }
+
+    this.setAuth({ busy: true, error: '' });
+    this.idbGet('users', id).then(function (user) {
+      if (!user) throw new Error('That account is no longer on this computer.');
+      return mmPasswordHash(pw, user.salt, user.iters || MM_KDF_ITERS).then(function (v) {
+        if (!mmSafeEqual(v.hash, user.hash)) {
+          var tries = (self.state.auth.tries || 0) + 1;
+          var patch = { busy: false, tries: tries, form: Object.assign({}, self.state.auth.form, { password: '' }) };
+          if (tries % 5 === 0) {
+            var wait = Math.min(300, 15 * Math.pow(2, Math.floor(tries / 5) - 1));
+            patch.until = Date.now() + wait * 1000;
+            setTimeout(function () { self.forceUpdate(); }, wait * 1000 + 100);
+          }
+          patch.error = 'That password doesn’t match.';
+          self.setAuth(patch);
+          return null;
+        }
+        return (user.encrypted ? mmDataKey(pw, user.salt, user.iters || MM_KDF_ITERS) : Promise.resolve(null))
+          .then(function (key) {
+            return self.readUserData(id, key).then(function (saved) {
+              var db = saved ? self.migrate(saved) : mmNewUserDb(false);
+              return { user: user, db: db, key: key, fresh: !saved };
+            });
+          });
+      });
+    }).then(function (r) {
+      if (!r) return;
+      self.enterSession(r.user, r.db, r.key, 'Signed in as ' + r.user.name + '.');
+    }).catch(function (e) {
+      self.authError(e && e.message ? e.message : 'Sign-in failed.');
+    });
+  }
+
+  /* Shared tail of signup and login: install the session and open the app. */
+  enterSession(user, db, key, message) {
+    var self = this;
+    this.userId = user.id;
+    this.dataKey = key || null;
+    this.bumpRev();
+    try { localStorage.setItem('mm-last-user', user.id); } catch (e) { }
+    var stamped = Object.assign({}, user, { lastLogin: Date.now() });
+    this.idbPut('users', stamped).catch(function () { });
+    var today = new Date();
+    this.setState({
+      db: db,
+      sel: [], cursor: -1, recon: null, dlg: null, confirm: null, menu: null, edit: null,
+      locked: false, unlock: '', lockTries: 0, lockUntil: 0, snaps2: [],
+      auth: Object.assign({}, this.state.auth, {
+        phase: 'ready', userId: user.id, name: user.name, email: user.email || '',
+        colour: user.colour, encrypted: !!user.encrypted, guest: false,
+        busy: false, error: '', tries: 0, until: 0,
+        form: { name: '', email: '', password: '', password2: '', samples: false, encrypt: false }
+      })
+    }, function () {
+      self.undoStack = [];
+      self.applyTheme();
+      if (db.__migrated) { delete self.state.db.__migrated; self.persist(); }
+      self.flash(message);
+      self.afterLoad();
+    });
+  }
+
+  signOut(preselect) {
+    var self = this;
+    var id = this.userId;
+    var done = function () {
+      self.userId = null;
+      self.dataKey = null;
+      self.undoStack = [];
+      self.bumpRev();
+      clearTimeout(self.lockTimer);
+      self.setState({
+        db: mmNewUserDb(false),
+        auth: Object.assign({}, self.state.auth, {
+          phase: 'login', userId: '', name: '', selected: preselect || id || '',
+          busy: false, error: '', tries: 0, until: 0,
+          form: { name: '', email: '', password: '', password2: '', samples: false, encrypt: false }
+        }),
+        sel: [], dlg: null, confirm: null, menu: null, locked: false, recon: null, snaps2: []
+      }, function () { self.bootAuth(); });
+    };
+    /* Never drop work in flight on the way out. */
+    if (this.idb && id) this.flushSave().then(done, done);
+    else done();
+  }
+
+  /* Sign out but land on the create-account screen rather than sign-in. */
+  signOutToSignup() {
+    var self = this;
+    var id = this.userId;
+    var done = function () {
+      self.userId = null;
+      self.dataKey = null;
+      self.undoStack = [];
+      self.bumpRev();
+      clearTimeout(self.lockTimer);
+      self.listUsers().then(function (users) {
+        self.setState({
+          db: mmNewUserDb(false),
+          sel: [], dlg: null, confirm: null, menu: null, locked: false, recon: null, snaps2: [],
+          auth: Object.assign({}, self.state.auth, {
+            phase: 'signup', userId: '', name: '', email: '', encrypted: false, guest: false,
+            legacyFound: false, busy: false, error: '', tries: 0, until: 0,
+            users: users.map(function (u) {
+              return { id: u.id, name: u.name, email: u.email || '', colour: u.colour, encrypted: !!u.encrypted, lastLogin: u.lastLogin || 0 };
+            }),
+            form: { name: '', email: '', password: '', password2: '', samples: false, encrypt: false }
+          })
+        });
+      });
+    };
+    if (this.idb && id) this.flushSave().then(done, done);
+    else done();
+  }
+
+  authError(msg) { this.setAuth({ busy: false, error: msg }); }
+  setAuth(patch) {
+    this.setState({ auth: Object.assign({}, this.state.auth, patch) });
+  }
+  setAuthForm(patch) {
+    this.setState({
+      auth: Object.assign({}, this.state.auth, {
+        error: '', form: Object.assign({}, this.state.auth.form, patch)
+      })
+    });
+  }
+
+  /* ---------- account maintenance ---------- */
+  openChangePassword() {
+    this.setState({ dlg: { kind: 'password', mode: 'edit', data: { current: '', next: '', next2: '' } } });
+  }
+  changePassword() {
+    var self = this, d = this.state.dlg, p = d.data;
+    var id = this.userId;
+    if (!id || id === 'guest') { this.flash('There is no stored account to change.'); return; }
+    var problem = mmPasswordProblem(p.next);
+    if (problem) { this.flash(problem); return; }
+    if (p.next !== p.next2) { this.flash('The two new passwords don’t match.'); return; }
+    this.idbGet('users', id).then(function (user) {
+      if (!user) throw new Error('That account is no longer stored.');
+      return mmPasswordHash(p.current, user.salt, user.iters || MM_KDF_ITERS).then(function (v) {
+        if (!mmSafeEqual(v.hash, user.hash)) throw new Error('Your current password doesn’t match.');
+        var salt = mmNewSalt();
+        return mmPasswordHash(p.next, salt, MM_KDF_ITERS).then(function (nv) {
+          return (user.encrypted ? mmDataKey(p.next, salt, MM_KDF_ITERS) : Promise.resolve(null))
+            .then(function (newKey) {
+              /* Re-write the data under the new key before swapping the
+                 verifier, so a failure here cannot orphan the data. */
+              return self.writeUserData(id, self.state.db, newKey).then(function () {
+                var updated = Object.assign({}, user, { salt: salt, hash: nv.hash, algo: nv.algo, iters: MM_KDF_ITERS, updatedAt: Date.now() });
+                return self.idbPut('users', updated).then(function () {
+                  self.dataKey = newKey;
+                  return true;
+                });
+              });
+            });
+        });
+      });
+    }).then(function () {
+      self.setState({ dlg: null });
+      self.flash('Password changed.');
+    }).catch(function (e) { self.flash(e && e.message ? e.message : 'The password could not be changed.'); });
+  }
+
+  openEncryption() {
+    var enc = !!this.state.auth.encrypted;
+    this.setState({ dlg: { kind: 'encrypt', mode: 'edit', data: { password: '', turnOn: !enc } } });
+  }
+  setEncryption() {
+    var self = this, d = this.state.dlg, p = d.data;
+    var id = this.userId;
+    if (!id || id === 'guest') { this.flash('There is no stored account to change.'); return; }
+    if (p.turnOn && !mmHasSubtle()) { this.flash('This browser cannot encrypt data.'); return; }
+    this.idbGet('users', id).then(function (user) {
+      if (!user) throw new Error('That account is no longer stored.');
+      return mmPasswordHash(p.password, user.salt, user.iters || MM_KDF_ITERS).then(function (v) {
+        if (!mmSafeEqual(v.hash, user.hash)) throw new Error('That password doesn’t match.');
+        return (p.turnOn ? mmDataKey(p.password, user.salt, user.iters || MM_KDF_ITERS) : Promise.resolve(null))
+          .then(function (key) {
+            return self.writeUserData(id, self.state.db, key).then(function () {
+              /* Old snapshots were written under the previous setting; drop
+                 them rather than leave a readable copy behind. */
+              return self.idbAll('snapshots').then(function (all) {
+                return Promise.all(all.filter(function (x) { return x.userId === id; })
+                  .map(function (x) { return self.idbDel('snapshots', x.id); }));
+              }).then(function () {
+                return self.idbPut('users', Object.assign({}, user, { encrypted: !!p.turnOn, updatedAt: Date.now() }));
+              }).then(function () { self.dataKey = key; return true; });
+            });
+          });
+      });
+    }).then(function () {
+      self.setState({
+        dlg: null, snaps2: [],
+        auth: Object.assign({}, self.state.auth, { encrypted: !!p.turnOn })
+      });
+      self.flash(p.turnOn
+        ? 'This account’s data is now encrypted on this device. Keep a backup — a forgotten password cannot be recovered.'
+        : 'Encryption turned off for this account.');
+    }).catch(function (e) { self.flash(e && e.message ? e.message : 'That could not be changed.'); });
+  }
+
+  openDeleteAccount() {
+    this.setState({
+      dlg: {
+        kind: 'delaccount', mode: 'edit',
+        data: { password: '', confirmName: '', name: this.state.auth.name || '' }
+      }
+    });
+  }
+  deleteAccountNow() {
+    var self = this, d = this.state.dlg, p = d.data;
+    var id = this.userId;
+    if (!id || id === 'guest') { this.flash('There is no stored account to delete.'); return; }
+    if (String(p.confirmName || '').trim() !== String(p.name || '').trim()) {
+      this.flash('Type the account name exactly to confirm.');
+      return;
+    }
+    this.idbGet('users', id).then(function (user) {
+      if (!user) throw new Error('That account is no longer stored.');
+      return mmPasswordHash(p.password, user.salt, user.iters || MM_KDF_ITERS).then(function (v) {
+        if (!mmSafeEqual(v.hash, user.hash)) throw new Error('That password doesn’t match.');
+        return true;
+      });
+    }).then(function () {
+      self.setState({
+        confirm: {
+          msg: 'Delete the account “' + p.name + '” and every transaction, budget and backup snapshot stored under it on this device? This cannot be undone.',
+          ok: function () {
+            clearTimeout(self.saveTimer);
+            self.deleteUserEverything(id).then(function () {
+              self.userId = null;
+              self.dataKey = null;
+              self.undoStack = [];
+              self.setState({ confirm: null, dlg: null, db: mmNewUserDb(false) }, function () {
+                self.bumpRev();
+                self.bootAuth();
+                self.flash('Account deleted.');
+              });
+            });
+          }
+        }
+      });
+    }).catch(function (e) { self.flash(e && e.message ? e.message : 'The account could not be deleted.'); });
   }
 
   /* Runs once the stored database is on screen: nothing here may create data
@@ -1738,70 +2332,179 @@ class Component extends DCLogic {
   openDb() {
     return new Promise(function (res, rej) {
       if (!window.indexedDB) return rej(new Error('no idb'));
-      /* v2 adds the 'snapshots' store used for pre-flight safety copies. */
-      var r = indexedDB.open('money-manager', 2);
+      /* v2 added 'snapshots' for pre-flight safety copies.
+         v3 adds 'users': one login per person, each with its own data record
+         at state['user:<id>'].  The old single 'app' record is left in place
+         and adopted by the first account created, so nothing is lost. */
+      var r = indexedDB.open('money-manager', 3);
       r.onupgradeneeded = function (e) {
         var d = e.target.result;
         if (!d.objectStoreNames.contains('state')) d.createObjectStore('state');
         if (!d.objectStoreNames.contains('snapshots')) d.createObjectStore('snapshots', { keyPath: 'id' });
+        if (!d.objectStoreNames.contains('users')) d.createObjectStore('users', { keyPath: 'id' });
       };
       r.onsuccess = function (e) { res(e.target.result); };
       r.onerror = function () { rej(r.error); };
     });
   }
-  readDb() {
+  /* ---------- low-level store helpers ---------- */
+  idbGet(store, key) {
     var idb = this.idb;
     return new Promise(function (res, rej) {
-      var rq = idb.transaction('state', 'readonly').objectStore('state').get('app');
-      rq.onsuccess = function () { res(rq.result || null); };
-      rq.onerror = function () { rej(rq.error); };
+      try {
+        var rq = idb.transaction(store, 'readonly').objectStore(store).get(key);
+        rq.onsuccess = function () { res(rq.result == null ? null : rq.result); };
+        rq.onerror = function () { rej(rq.error); };
+      } catch (e) { rej(e); }
     });
   }
-  persist() {
-    var self = this;
-    if (!this.idb) return;
-    clearTimeout(this.saveTimer);
-    this.saveTimer = setTimeout(function () {
+  idbPut(store, value, key) {
+    var idb = this.idb;
+    return new Promise(function (res, rej) {
       try {
-        var out = mmClone(self.state.db);
-        delete out.__migrated;
-        self.idb.transaction('state', 'readwrite').objectStore('state').put(out, 'app');
-      }
-      catch (e) { self.flash('We couldn\u2019t save your data locally. Your changes are still on screen.'); }
-      self.cloudAutoPush();
-    }, 250);
+        var os = idb.transaction(store, 'readwrite').objectStore(store);
+        var rq = key === undefined ? os.put(value) : os.put(value, key);
+        rq.onsuccess = function () { res(true); };
+        rq.onerror = function () { rej(rq.error); };
+      } catch (e) { rej(e); }
+    });
   }
-
-  /* Write a full copy of the database to IndexedDB before anything
-     irreversible.  Only the five most recent are kept. */
-  snapshot(label) {
-    var self = this;
-    if (!this.idb) return Promise.resolve(false);
-    var rec = { id: 'snap-' + Date.now(), label: label || 'safety copy', at: Date.now(), payload: mmClone(this.state.db) };
-    delete rec.payload.__migrated;
+  idbDel(store, key) {
+    var idb = this.idb;
     return new Promise(function (res) {
       try {
-        var st = self.idb.transaction('snapshots', 'readwrite').objectStore('snapshots');
-        st.put(rec);
-        var all = st.getAllKeys();
-        all.onsuccess = function () {
-          var keys = (all.result || []).sort();
-          while (keys.length > 5) { try { st.delete(keys.shift()); } catch (e) { } }
-          res(true);
-        };
-        all.onerror = function () { res(true); };
+        var rq = idb.transaction(store, 'readwrite').objectStore(store).delete(key);
+        rq.onsuccess = function () { res(true); };
+        rq.onerror = function () { res(false); };
       } catch (e) { res(false); }
     });
   }
-  listSnapshots() {
-    var self = this;
-    if (!this.idb) return Promise.resolve([]);
+  idbAll(store) {
+    var idb = this.idb;
     return new Promise(function (res) {
       try {
-        var rq = self.idb.transaction('snapshots', 'readonly').objectStore('snapshots').getAll();
-        rq.onsuccess = function () { res((rq.result || []).sort(function (a, b) { return b.at - a.at; })); };
+        var rq = idb.transaction(store, 'readonly').objectStore(store).getAll();
+        rq.onsuccess = function () { res(rq.result || []); };
         rq.onerror = function () { res([]); };
       } catch (e) { res([]); }
+    });
+  }
+
+  /* ---------- accounts ---------- */
+  listUsers() {
+    if (!this.idb) return Promise.resolve([]);
+    return this.idbAll('users').then(function (list) {
+      return list.sort(function (a, b) { return (b.lastLogin || 0) - (a.lastLogin || 0); });
+    });
+  }
+  dataKeyFor(userId) { return 'user:' + userId; }
+
+  /* Read one account's data, decrypting it when the account is encrypted.
+     A wrong key throws, which is how a bad password is detected for
+     encrypted accounts even if the verifier were somehow bypassed. */
+  readUserData(userId, key) {
+    var self = this;
+    return this.idbGet('state', this.dataKeyFor(userId)).then(function (rec) {
+      if (!rec) return null;
+      if (rec && rec.__enc) {
+        if (!key) throw new Error('This account is encrypted and needs its password.');
+        return mmDecryptJson(key, rec);
+      }
+      return rec;
+    });
+  }
+  writeUserData(userId, db, key) {
+    var out = mmClone(db);
+    delete out.__migrated;
+    var self = this;
+    if (key) return mmEncryptJson(key, out).then(function (rec) { return self.idbPut('state', rec, self.dataKeyFor(userId)); });
+    return this.idbPut('state', out, this.dataKeyFor(userId));
+  }
+
+  readDb() {
+    /* Kept for the single-user path: reads whichever account is signed in. */
+    if (!this.userId) return Promise.resolve(null);
+    return this.readUserData(this.userId, this.dataKey);
+  }
+  persist() {
+    var self = this;
+    if (!this.idb || !this.userId) return;
+    clearTimeout(this.saveTimer);
+    this.saveTimer = setTimeout(function () { self.flushSave(); }, 250);
+  }
+  /* Write now rather than on the debounce \u2014 used before signing out or
+     switching accounts so nothing in flight is lost. */
+  flushSave() {
+    var self = this;
+    clearTimeout(this.saveTimer);
+    if (!this.idb || !this.userId) return Promise.resolve(false);
+    return this.writeUserData(this.userId, this.state.db, this.dataKey)
+      .then(function () { self.cloudAutoPush(); return true; })
+      .catch(function () {
+        self.flash('We couldn\u2019t save your data locally. Your changes are still on screen.');
+        return false;
+      });
+  }
+
+  /* Write a full copy of the signed-in account's database before anything
+     irreversible.  Snapshots are per account; the five most recent are kept. */
+  snapshot(label) {
+    var self = this;
+    if (!this.idb || !this.userId) return Promise.resolve(false);
+    var payload = mmClone(this.state.db);
+    delete payload.__migrated;
+    var rec = {
+      id: 'snap-' + this.userId + '-' + Date.now(),
+      userId: this.userId,
+      label: label || 'safety copy',
+      at: Date.now(),
+      payload: payload
+    };
+    /* Encrypted accounts keep their snapshots encrypted too, or the safety
+       copy would be a plain-text back door around the encryption. */
+    var prep = this.dataKey
+      ? mmEncryptJson(this.dataKey, payload).then(function (enc) { rec.payload = enc; return rec; })
+      : Promise.resolve(rec);
+    return prep.then(function (r) {
+      return self.idbPut('snapshots', r).then(function () {
+        return self.idbAll('snapshots').then(function (all) {
+          var mine = all.filter(function (x) { return x.userId === self.userId; })
+            .sort(function (a, b) { return b.at - a.at; });
+          var extra = mine.slice(5);
+          return Promise.all(extra.map(function (x) { return self.idbDel('snapshots', x.id); }));
+        });
+      });
+    }).then(function () { return true; }).catch(function () { return false; });
+  }
+  listSnapshots() {
+    var self = this;
+    if (!this.idb || !this.userId) return Promise.resolve([]);
+    return this.idbAll('snapshots').then(function (all) {
+      var mine = all.filter(function (x) {
+        /* Records written before accounts existed have no userId; show them to
+           whoever adopted the original database so they stay reachable. */
+        return x.userId === self.userId || (!x.userId && self.adoptedLegacy);
+      });
+      return Promise.all(mine.map(function (rec) {
+        if (!rec.payload || !rec.payload.__enc) return rec;
+        if (!self.dataKey) return null;
+        return mmDecryptJson(self.dataKey, rec.payload)
+          .then(function (p) { return Object.assign({}, rec, { payload: p }); })
+          .catch(function () { return null; });
+      })).then(function (rows) {
+        return rows.filter(Boolean).sort(function (a, b) { return b.at - a.at; });
+      });
+    });
+  }
+  deleteUserEverything(userId) {
+    var self = this;
+    return this.idbDel('state', this.dataKeyFor(userId)).then(function () {
+      return self.idbAll('snapshots');
+    }).then(function (all) {
+      return Promise.all(all.filter(function (x) { return x.userId === userId; })
+        .map(function (x) { return self.idbDel('snapshots', x.id); }));
+    }).then(function () {
+      return self.idbDel('users', userId);
     });
   }
 
@@ -2696,13 +3399,15 @@ class Component extends DCLogic {
       txn: this.saveTxn, account: this.saveAccount, budget: this.saveBudget, recur: this.saveRecur,
       loan: this.saveLoan, cardpay: this.saveCardPay, bill: this.saveBill, goal: this.saveGoal,
       rule: this.saveRule, loanpay: this.saveLoanPay, recon: this.saveRecon, view: this.saveView,
-      goaltop: this.saveGoalTopUp, delacct: this.confirmDeleteAccount, catmerge: this.confirmCatMerge
+      goaltop: this.saveGoalTopUp, delacct: this.confirmDeleteAccount, catmerge: this.confirmCatMerge,
+      password: this.changePassword, encrypt: this.setEncryption, delaccount: this.deleteAccountNow
     };
     if (by[d.kind]) { by[d.kind].call(this); return true; }
     return false;
   }
   handleKey(e) {
     var s = this.state, mod = e.ctrlKey || e.metaKey;
+    if (!s.auth || s.auth.phase !== 'ready') return;   /* the sign-in screen owns the keyboard */
     if (s.locked) return;                      /* the lock screen owns the keyboard */
     if (e.key === 'Escape') {
       if (s.dlg || s.confirm || s.menu || s.edit) {
@@ -5482,7 +6187,7 @@ class Component extends DCLogic {
   settingsVals() {
     var self = this, db = this.state.db, st = db.settings;
     var section = this.state.setSection || 'General';
-    var SECTIONS = ['General', 'Categories', 'Rules', 'Payments', 'Security', 'Backup', 'Cloud', 'Data'];
+    var SECTIONS = ['Account', 'General', 'Categories', 'Rules', 'Payments', 'Security', 'Backup', 'Cloud', 'Data'];
     var setField = function (k) {
       return function (e) {
         var v = e.target.type === 'checkbox' ? e.target.checked : e.target.value;
@@ -5593,6 +6298,7 @@ class Component extends DCLogic {
             ';color:var(--c-16232f);font-weight:' + (active ? '700' : '400') + ';cursor:pointer;font-size:12px'
         };
       }),
+      isSetAccount: section === 'Account',
       isSetGeneral: section === 'General',
       isSetCats: section === 'Categories',
       isSetRules: section === 'Rules',
@@ -5602,6 +6308,35 @@ class Component extends DCLogic {
       isSetCloud: section === 'Cloud',
       isSetData: section === 'Data',
       setSectionTitle: section,
+
+      /* ----- account ----- */
+      acctName: this.state.auth.name || 'Guest',
+      acctEmail: this.state.auth.email || 'no email address',
+      acctInitial: String(this.state.auth.name || '?').trim().charAt(0).toUpperCase(),
+      acctAvatarStyle: 'width:34px;height:34px;flex:none;border-radius:50%;display:grid;place-items:center;color:var(--c-onaccent);font-weight:700;font-size:15px;background:' + (this.state.auth.colour || '#2b5f96'),
+      acctIsGuest: !!this.state.auth.guest,
+      acctEncrypted: !!this.state.auth.encrypted,
+      acctEncryptLabel: this.state.auth.encrypted ? 'Encrypted on this device' : 'Not encrypted',
+      acctEncryptStyle: 'font-weight:600;color:' + (this.state.auth.encrypted ? 'var(--c-1a6b3c)' : 'var(--c-b3701c)'),
+      acctEncryptAction: this.state.auth.encrypted ? 'Turn off encryption…' : 'Encrypt this account…',
+      acctOtherCount: Math.max(0, (this.state.auth.users || []).length - 1),
+      acctStats: db.txns.length + ' transactions · ' + db.accounts.length + ' accounts · ' +
+        db.categories.length + ' categories, all belonging to this account only',
+      changePassword: function () { self.openChangePassword(); },
+      toggleEncryption: function () { self.openEncryption(); },
+      signOut: function () { self.signOut(); },
+      switchUser: function () { self.signOut(); },
+      addAccount: function () {
+        self.setAuth({ phase: 'signup', error: '', form: { name: '', email: '', password: '', password2: '', samples: false, encrypt: false } });
+        /* Leaving the current session open would let the new account inherit
+           it, so sign out on the way to the create-account screen. */
+        self.signOutToSignup();
+      },
+      deleteAccount: function () { self.openDeleteAccount(); },
+      accountNote: 'Each account on this computer has its own database record. Nothing is shared between them — not transactions, not budgets, not the PIN, not the cloud connection.',
+      accountSecurityNote: this.state.auth.encrypted
+        ? 'This account’s data is encrypted with a key derived from your password, so the other accounts here cannot read it even with developer tools.'
+        : 'Accounts are kept separate, but without encryption someone with access to this browser profile could still read this data directly. Turn on encryption below if that matters.',
 
       genFields: genFields,
 
@@ -6172,7 +6907,7 @@ class Component extends DCLogic {
     else if (tab === 'Reconcile') v = this.reconVals(bal);
     else if (tab === 'Calendar') v = this.calVals();
     else if (tab === 'Settings') v = this.settingsVals();
-    return Object.assign(v, this.menuVals(), this.dlgVals(), this.miscVals());
+    return Object.assign(v, this.menuVals(), this.dlgVals(), this.miscVals(), this.authVals());
   }
   menuVals() {
     var self = this, m = this.state.menu;
@@ -7324,6 +8059,32 @@ class Component extends DCLogic {
       }
       note = 'Nothing is deleted until you confirm, and Undo is available immediately afterwards.';
       buttons = [cancel, this.btn('Continue', function () { self.confirmCatMerge(); }, 'primary')];
+    } else if (d.kind === 'password') {
+      title = 'Change password';
+      width = 420;
+      fields.push(this.fld('Current password', 'text', d.data.current, set('current'), { type: 'password', focus: true }));
+      fields.push(this.fld('New password', 'text', d.data.next, set('next'), { type: 'password', hint: 'at least 8 characters, a letter and a number' }));
+      fields.push(this.fld('Repeat it', 'text', d.data.next2, set('next2'), { type: 'password' }));
+      note = s.auth.encrypted
+        ? 'This account is encrypted, so the stored data is re-encrypted under the new password. Keep a backup before changing it.'
+        : 'Only the sign-in password changes; your data is untouched.';
+      buttons = [cancel, this.btn('Change password', function () { self.changePassword(); }, 'primary')];
+    } else if (d.kind === 'encrypt') {
+      title = d.data.turnOn ? 'Encrypt this account' : 'Turn off encryption';
+      width = 460;
+      fields.push(this.fld('Your password', 'text', d.data.password, set('password'), { type: 'password', focus: true }));
+      note = d.data.turnOn
+        ? 'Your data on this device will be scrambled with a key derived from your password, so no other account here — and nobody with developer tools — can read it. There is no way to recover it if you forget the password, so download a backup first. Existing safety snapshots are discarded because they were written unencrypted.'
+        : 'Your data will be stored in the clear again. Other accounts on this computer still cannot see it in the app, but anyone with access to this browser profile could read it directly.';
+      buttons = [cancel, this.btn(d.data.turnOn ? 'Encrypt' : 'Turn off', function () { self.setEncryption(); }, d.data.turnOn ? 'primary' : 'danger')];
+    } else if (d.kind === 'delaccount') {
+      title = 'Delete this account';
+      width = 480;
+      fields.push(this.fld('Account', 'static', d.data.name, null, {}));
+      fields.push(this.fld('Your password', 'text', d.data.password, set('password'), { type: 'password', focus: true }));
+      fields.push(this.fld('Type the name', 'text', d.data.confirmName, set('confirmName'), { hint: d.data.name }));
+      note = 'Everything stored under this account on this device goes: every transaction, budget, bill, loan, rule and safety snapshot. Other accounts on this computer are untouched. This cannot be undone — download a backup from Settings → Backup first if you might want the data later.';
+      buttons = [cancel, this.btn('Delete account', function () { self.deleteAccountNow(); }, 'danger')];
     } else if (d.kind === 'note') {
       title = d.title || 'Information';
       width = 520;
@@ -7592,6 +8353,109 @@ class Component extends DCLogic {
       closeDlg: function () { self.setState({ dlg: null }); }
     };
   }
+  /* ---------- sign-in screens ---------- */
+  authVals() {
+    var self = this, a = this.state.auth || {}, f = a.form || {};
+    var phase = a.phase || 'boot';
+    var waitMs = Math.max(0, (a.until || 0) - Date.now());
+    var chosen = (a.users || []).filter(function (u) { return u.id === a.selected; })[0] || null;
+    var set = function (k) {
+      return function (e) {
+        var v = e.target.type === 'checkbox' ? e.target.checked : e.target.value;
+        var p = {}; p[k] = v;
+        self.setAuthForm(p);
+      };
+    };
+    return {
+      signedIn: phase === 'ready',
+      needsAuth: phase === 'login' || phase === 'signup',
+      authBooting: phase === 'boot',
+      isSignup: phase === 'signup',
+      isLogin: phase === 'login',
+      authBusy: !!a.busy,
+      authError: a.error || '',
+      hasAuthError: !!a.error,
+      authTitle: phase === 'signup'
+        ? (a.legacyFound ? 'Set up your account' : ((a.users || []).length ? 'Add another account' : 'Create your account'))
+        : 'Sign in',
+      authSubtitle: phase === 'signup'
+        ? (a.legacyFound
+          ? 'This copy of Money Manager already holds data. Create an account and it will be moved into it — nothing is lost.'
+          : 'Everyone who uses this computer gets their own login and their own separate set of books.')
+        : 'Each account keeps its own accounts, transactions, budgets and settings.',
+
+      /* ----- sign in ----- */
+      authUsers: (a.users || []).map(function (u) {
+        var active = u.id === a.selected;
+        return {
+          name: u.name,
+          meta: (u.email ? u.email : 'no email') + (u.encrypted ? ' · encrypted' : ''),
+          initial: String(u.name || '?').trim().charAt(0).toUpperCase(),
+          go: function () { self.setAuth({ selected: u.id, error: '', form: Object.assign({}, f, { password: '' }) }); },
+          style: 'display:flex;align-items:center;gap:8px;width:100%;text-align:left;padding:6px 8px;border:1px solid ' +
+            (active ? 'var(--c-7ba4cc)' : 'var(--c-cddcea)') + ';background:' +
+            (active ? 'linear-gradient(var(--c-cfe4f7),var(--c-b3d3ef))' : 'var(--c-surface)') +
+            ';cursor:pointer;border-radius:2px;margin-bottom:4px',
+          dotStyle: 'width:24px;height:24px;flex:none;border-radius:50%;display:grid;place-items:center;color:var(--c-onaccent);font-weight:700;background:' + (u.colour || '#2b5f96'),
+          nameStyle: 'flex:1;min-width:0;font-weight:' + (active ? '700' : '600') + ';color:var(--c-16232f);overflow:hidden;text-overflow:ellipsis;white-space:nowrap',
+          metaStyle: 'font-size:10px;color:var(--c-5b7186);flex:none'
+        };
+      }),
+      authSelectedName: chosen ? chosen.name : '',
+      authPassword: f.password || '',
+      onAuthPassword: set('password'),
+      onAuthKey: function (e) {
+        if (e.key !== 'Enter') return;
+        if (phase === 'signup') self.doSignup(); else self.doLogin();
+      },
+      doLogin: function () { self.doLogin(); },
+      loginLabel: a.busy ? 'Checking…' : 'Sign in',
+      loginDisabledNote: waitMs > 0 ? 'Too many attempts — wait ' + Math.ceil(waitMs / 1000) + 's.' : '',
+      goSignup: function () {
+        self.setAuth({ phase: 'signup', error: '', form: { name: '', email: '', password: '', password2: '', samples: false, encrypt: false } });
+      },
+      goLogin: function () {
+        self.setAuth({ phase: 'login', error: '', form: Object.assign({}, f, { password: '' }) });
+      },
+      canGoLogin: (a.users || []).length > 0,
+
+      /* ----- create account ----- */
+      signupName: f.name || '',
+      signupEmail: f.email || '',
+      signupPassword: f.password || '',
+      signupPassword2: f.password2 || '',
+      signupSamples: !!f.samples,
+      signupEncrypt: !!f.encrypt,
+      onSignupName: set('name'),
+      onSignupEmail: set('email'),
+      onSignupPassword: set('password'),
+      onSignupPassword2: set('password2'),
+      onSignupSamples: set('samples'),
+      onSignupEncrypt: set('encrypt'),
+      doSignup: function () { self.doSignup(); },
+      signupLabel: a.busy ? 'Creating…' : (a.legacyFound ? 'Create account and keep my data' : 'Create account'),
+      canEncrypt: mmHasSubtle(),
+      cantEncrypt: !mmHasSubtle(),
+      encryptNote: mmHasSubtle()
+        ? 'Scrambles this account’s data on this device so the other accounts here cannot read it. If you forget the password the data cannot be recovered — keep a backup.'
+        : 'Not available in this browser.',
+      samplesNote: 'Adds a few example accounts and transactions so you can look around. Remove them later from Settings → Data.',
+      passwordHint: 'At least 8 characters, with a letter and a number.',
+      authFootnote: 'Accounts live only in this browser on this computer. Signing in does not send anything anywhere — use Settings → Cloud backup if you want your data on another device.',
+
+      /* ----- the signed-in identity shown in the title bar ----- */
+      whoName: a.name || 'Guest',
+      whoInitial: String(a.name || '?').trim().charAt(0).toUpperCase(),
+      whoStyle: 'width:17px;height:17px;flex:none;border-radius:50%;display:grid;place-items:center;font-size:10px;font-weight:700;color:var(--c-onaccent);background:' + (a.colour || '#2b5f96'),
+      whoTitle: a.guest
+        ? 'Guest session — this browser is blocking storage, so nothing is being saved'
+        : 'Signed in as ' + (a.name || '') + (a.email ? ' (' + a.email + ')' : '') + (a.encrypted ? ' · data encrypted' : ''),
+      whoIsGuest: !!a.guest,
+      goAccount: function () { self.setState({ tab: 'Settings', setSection: 'Account' }); },
+      doSignOut: function () { self.signOut(); }
+    };
+  }
+
   miscVals() {
     var self = this, s = this.state;
     var waitMs = Math.max(0, (s.lockUntil || 0) - Date.now());
