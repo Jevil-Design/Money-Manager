@@ -1,0 +1,10 @@
+# The sync server is meant to be self-hosted (see server/README.md): it is a
+# long-running Express process with a SQLite file on a mounted volume. Vercel
+# runs serverless functions on a read-only filesystem with no persistent disk,
+# so deploying it here would crash on start and could not store backups anyway.
+# Excluding it makes this deployment a plain static site.
+server/
+
+# Design-canvas scratch files, not needed by the app.
+.thumbnail
+uploads/
