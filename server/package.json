@@ -1,0 +1,19 @@
+{
+  "name": "money-manager-server",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Backup, restore and multi-device sync server for the Money Manager desktop app",
+  "type": "commonjs",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "register": "node register-user.js"
+  },
+  "engines": { "node": ">=20" },
+  "dependencies": {
+    "better-sqlite3": "^11.3.0",
+    "cors": "^2.8.5",
+    "express": "^4.19.2"
+  }
+}
