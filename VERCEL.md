@@ -1,86 +1,82 @@
 # Running Money Manager on Vercel
 
-The deployment serves two things from one project:
+One project serves two things:
 
 | Path | What it is |
 |---|---|
-| `/` | the app itself — a static page, rewritten to `Money Manager.dc.html` |
-| `/api/v1/*` | the backup & sync API, one serverless function in `api/` |
+| `/` | the app — a static page, rewritten to `Money Manager.dc.html` |
+| `/api/v1/*` | the API and the database, one serverless function in `api/` |
 
-`server/` is the original self-hosted version. It is excluded from the
-deployment by `.vercelignore` and kept only for anyone who wants to run it on
-their own machine — it cannot run on Vercel (it writes to disk at start-up,
-uses `better-sqlite3`, and calls `app.listen()`).
+**Your data lives in the cloud database, not in the browser.** Sign in with the
+same email and password on any computer or phone and the same books open. The
+browser keeps only a session token; nothing financial is stored locally.
+
+The trade-offs that come with that, stated plainly:
+
+- **No offline use.** Without a connection the app cannot load or save.
+- **The database is the only copy.** If the deployment or the database goes
+  away, so do the books. Download a backup now and then (Settings → Backup).
+- **There is no password reset.** Nothing but you knows your password. A backup
+  file is the way back in.
+
+`server/` is the original self-hosted version, excluded from the deployment by
+`.vercelignore`. It cannot run on Vercel (it writes to disk at start-up, uses
+`better-sqlite3`, and calls `app.listen()`).
 
 ## 1. Add a database
 
-The API needs Postgres. Any provider works; the Vercel Marketplace (Neon) is
-the least work:
-
 **Vercel dashboard → Storage → Create → Neon/Postgres → Connect to project.**
+That sets `POSTGRES_URL` for you.
 
-That sets `POSTGRES_URL` for you. If you bring your own database (Supabase,
-RDS, a VPS…), add `POSTGRES_URL` yourself under
-**Settings → Environment Variables**, e.g.
+Bringing your own (Supabase, RDS, a VPS) works too — add `POSTGRES_URL` under
+**Settings → Environment Variables**:
 
 ```
 POSTGRES_URL = postgres://user:password@host:5432/dbname?sslmode=require
 ```
 
-The tables (`mm_user`, `mm_snapshot`, `mm_sync_log`) are created automatically
-on the first request. There is no migration step.
+**It must be UTF8.** A database created with a Windows/Latin-1 encoding cannot
+store the ₹ sign and every save will fail. Hosted Postgres is UTF8 already;
+`/api/v1/health` reports the encoding so you can check.
 
-## 2. Add your Google client ID
+Tables are created on the first request — `mm_user`, `mm_token`, `mm_state`,
+`mm_snapshot`, `mm_sync_log`. There is no migration step.
 
-Sign-in is how the server issues you an API token — the `npm run register` CLI
-of the self-hosted version cannot run on Vercel.
+## 2. Decide who may sign up
 
-Follow `server/GOOGLE-SETUP.md` to create an OAuth client, then add your
-Vercel URL to the client's **Authorised JavaScript origins**:
+The site is on the public internet, so set this before you share the URL:
 
 ```
-https://your-project.vercel.app
+ALLOWED_EMAILS = you@gmail.com, partner@gmail.com
 ```
 
-Then set the environment variable:
+Everyone listed can create their own account, each with completely separate
+books. **If you leave it unset, the first account to register claims the
+deployment and everyone after is refused** — safe for one person, but setting
+it explicitly is better because it survives clearing the database.
+
+## 3. Optional: Google sign-in
+
+Not required — email and password is the normal route. If you want the Google
+button (and Drive backup), follow `server/GOOGLE-SETUP.md`, add your Vercel URL
+to the OAuth client's **Authorised JavaScript origins**, and set:
 
 ```
 GOOGLE_CLIENT_ID = 1234....apps.googleusercontent.com
 ```
 
-## 3. Lock it down
+## 4. Use it
 
-The site is on the public internet, so decide who may hold an account:
-
-```
-ALLOWED_EMAILS = you@gmail.com
-```
-
-**If you leave `ALLOWED_EMAILS` unset, the first Google account to sign in
-claims the deployment and everyone afterwards is refused.** That is a safe
-default for one person, but setting your address explicitly is better — it
-still works if you ever clear the database. (The self-hosted server allowed
-anyone to sign up, which is fine on a home network and not fine on a public
-URL, so the default here fails closed.)
-
-## 4. Connect the app
-
-Open your Vercel URL, then **Settings → Cloud backup & sync**:
-
-1. Paste your Google client ID into **Google client ID**.
-2. Set **Backup to** → **My server**. The **Server URL** already points at this
-   site, so leave it alone.
-3. Click **Sign in with Google**. The server checks the sign-in with Google,
-   confirms it was issued to your OAuth client, and stores an API token in the
-   app. You should see *"Server recognised your Google account"*.
-4. **Push backup now**, then **Refresh snapshots**.
+Open your Vercel URL → **Create an account** → name, email, password. That is
+the whole setup. On another device, open the same URL and **Sign in**.
 
 ## Optional environment variables
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `ALLOWED_EMAILS` | *(first-sign-in claims it)* | comma-separated allowlist |
-| `KEEP_SNAPSHOTS` | `40` | how many snapshots to keep per account |
+| `ALLOWED_EMAILS` | *(first registration claims it)* | who may create an account |
+| `GOOGLE_CLIENT_ID` | *(unset)* | enables the Google sign-in button |
+| `KEEP_SNAPSHOTS` | `40` | snapshots kept per account |
 | `CORS_ORIGIN` | `*` | restrict which origins may call the API |
 | `PGSSL_NO_VERIFY` | *(unset)* | set to `1` only if your provider's TLS certificate is not trusted by Node |
 
@@ -94,66 +90,74 @@ curl https://your-project.vercel.app/api/v1/health
 {
   "ok": true,
   "database": "connected",
-  "googleSignIn": true,
+  "encoding": "UTF8",
+  "encodingOk": true,
   "accessPolicy": "allowlist",
   "keepSnapshots": 40
 }
 ```
 
-`ok: false` with `database: "unavailable"` means `POSTGRES_URL` is missing or
-wrong. `googleSignIn: false` means `GOOGLE_CLIENT_ID` is not set.
+- `database: "unavailable"` → `POSTGRES_URL` is missing or wrong.
+- `encodingOk: false` → the database is not UTF8; recreate it with UTF8.
 
-## Size limits — the one real constraint
+## Two devices at once
 
-A serverless request body is capped at about 4.5 MB. A text-only database of
-10,000 transactions is already ~4.5 MB of JSON, so **the app gzips every push**
-(roughly 20x, taking that same database to ~0.25 MB). Plenty of headroom for
-text.
+Each save carries the revision it was based on. If the account changed
+elsewhere in the meantime the server refuses the write and the app asks
+whether to take the other version or replace it — the version being replaced
+is kept as a snapshot either way. Nothing is silently overwritten.
 
-Receipt images are the exception: they are stored inside the backup as data
-URLs and barely compress. A database with a few dozen attached photos will
-exceed the limit, and the app will tell you so rather than failing obscurely.
-**Back up to Google Drive instead in that case** — Drive uploads go straight
-from your browser to Google, so no size limit applies.
+A snapshot is also written automatically every few hours as you work, and
+before any restore or import, which is your version history given there is no
+local copy.
 
-## Logins are per browser, cloud accounts are per login
+## Sessions
 
-Everyone who uses this copy of the app signs in with their own local account,
-and each one has a completely separate database in the browser. That is a
-different thing from the API account:
+A session lasts 30 days and renews while you use it. Changing your password
+signs out every other device. **Settings → Account → Sign out of every
+device** does the same on demand, which is what to use if a phone is lost.
 
-- **Local account** — who is using the app on this computer. Created on the
-  sign-in screen, stored only in this browser, never sent anywhere.
-- **API account** — where a backup goes. Each local account connects its own,
-  by signing in with Google under Settings → Cloud backup.
+## Size limits
 
-So two people sharing a computer keep separate books locally *and* separate
-snapshots on the server, because the API scopes every snapshot to the token
-that pushed it. `ALLOWED_EMAILS` therefore needs every address that should be
-allowed to back up, not just yours.
+A serverless request body is capped at about 4.5 MB, and 10,000 plain
+transactions is already ~4.5 MB of JSON — so **every save is gzipped**
+(roughly 20x). Plenty of headroom for text.
 
-There is no password reset for a local account: nothing on the server knows
-about it. A forgotten password means restoring from a backup file, so keep one.
+Receipt images are the exception: they are stored inside the document as data
+URLs and barely compress. A few dozen photos will exceed the limit and the app
+will say so. Keep attachments modest, or use Google Drive backup, whose
+uploads go straight from the browser to Google.
 
-## What is and is not sent
+## Coming from the older local-only version
 
-Pushed: accounts, transactions, categories, budgets, recurring entries, bills,
-loans, cards, goals, rules and settings.
+If you used this app before it moved to the cloud, your data is still in the
+browser. Sign in, then **Settings → Account → Import data left by the older
+version…**. It copies the old database into your cloud account (keeping a
+snapshot of whatever was there first).
 
-Never pushed: your PIN (not even its hash) and this device's API token — both
-are stripped before anything leaves the browser.
+If the old data was in an *encrypted* local account, that import cannot read
+it — open the previous version, sign in, download a backup file, and restore
+that file instead.
 
 ## Endpoints
 
-All under `/api/v1`, same shapes as the self-hosted server:
+All under `/api/v1`:
 
 ```
-GET    /health              no auth; liveness and configuration
-POST   /auth/google         {accessToken} -> {token, email}
-GET    /me                  account and counts
-POST   /backup              {label, device, payload} -> stores a snapshot
-GET    /backup/latest       newest snapshot with its payload
-GET    /backup/:id          one snapshot with its payload
+GET    /health              no auth; liveness, encoding, configuration
+POST   /auth/register       {name,email,password} -> {token,user}
+POST   /auth/login          {email,password} -> {token,user}
+GET    /auth/session        who am I, and the current revision
+POST   /auth/logout         end this session
+POST   /auth/logout-all     end every session
+POST   /auth/password       {current,next}
+DELETE /auth/account        {password} — deletes everything
+POST   /auth/google         {accessToken} -> {token,user}
+GET    /state               the live document + revision
+PUT    /state               {rev,data} -> {rev}, or 409 on a stale revision
+POST   /backup              store a snapshot
+GET    /backup/latest       newest snapshot
+GET    /backup/:id          one snapshot
 GET    /snapshots           snapshot list, no payloads
 DELETE /snapshots/:id       remove one snapshot
 GET    /transactions        ?from&to&limit&offset
@@ -164,7 +168,7 @@ GET    /sync-log            recent push/pull activity
 Send a gzipped body with `X-MM-Encoding: gzip` and
 `Content-Type: application/octet-stream`; plain JSON is accepted too.
 
-`/transactions` and `/balances` are answered from the newest snapshot's JSON.
-The self-hosted server mirrored each backup into relational tables to serve
-them; keeping a second copy in step is a lot of moving parts for a read side
-nothing depends on, so there is one source of truth here instead.
+Passwords are stored as PBKDF2-SHA256 (210,000 iterations) over a per-account
+random salt. Session tokens are stored only as digests. Wrong passwords are
+throttled with a growing pause. `/transactions` and `/balances` are answered
+from the live document rather than a mirrored relational copy.

@@ -6,23 +6,36 @@
  * a read-only filesystem, no persistent disk and must export a handler, so the
  * storage layer is Postgres and the whole API is this one file.
  *
- * Routes (all under /api/v1, identical shapes to the self-hosted server):
- *   GET    /health                 no auth — liveness + configuration report
- *   POST   /auth/google            exchange a Google access token for an API token
- *   GET    /me                     account + counts
- *   POST   /backup                 store a snapshot
- *   GET    /backup/latest          newest snapshot
- *   GET    /backup/:id             one snapshot
- *   GET    /snapshots              snapshot list (no payloads)
- *   DELETE /snapshots/:id          remove one snapshot
- *   GET    /transactions           read side, served from the newest snapshot
- *   GET    /balances               read side, served from the newest snapshot
- *   GET    /sync-log               recent push/pull activity
+ * Routes (all under /api/v1):
+ *   GET    /health              no auth — liveness, encoding, configuration
+ *   POST   /auth/register       {name,email,password} -> {token,user}
+ *   POST   /auth/login          {email,password} -> {token,user}
+ *   GET    /auth/session        the signed-in user and the current revision
+ *   POST   /auth/logout         end this session
+ *   POST   /auth/logout-all     end every session for the account
+ *   POST   /auth/password       {current,next} — also ends other sessions
+ *   DELETE /auth/account        {password} — removes the account and its data
+ *   POST   /auth/google         exchange a Google access token for a session
+ *   GET    /state               the live document + revision
+ *   PUT    /state               {rev,data} -> {rev}, 409 if rev is stale
+ *   POST   /backup              store a snapshot
+ *   GET    /backup/latest       newest snapshot
+ *   GET    /backup/:id          one snapshot
+ *   GET    /snapshots           snapshot list (no payloads)
+ *   DELETE /snapshots/:id       remove one snapshot
+ *   GET    /transactions        read side, from the live document
+ *   GET    /balances            read side, from the live document
+ *   GET    /sync-log            recent push/pull activity
+ *
+ * The database is the only home for a user's books: the browser keeps just a
+ * session token.  PUT /state carries the revision it was based on so two
+ * devices cannot silently overwrite each other.
  *
  * Environment:
  *   POSTGRES_URL        required — any Postgres (Vercel/Neon, Supabase, RDS…)
- *   GOOGLE_CLIENT_ID    required for sign-in — the OAuth client the app uses
- *   ALLOWED_EMAILS      optional — comma-separated allowlist. See claimAccount().
+ *   GOOGLE_CLIENT_ID    optional — enables the Google sign-in button
+ *   ALLOWED_EMAILS      optional — who may register. Unset: the first account
+ *                       to register claims the deployment and later ones are refused.
  *   KEEP_SNAPSHOTS      optional — how many snapshots to retain (default 40)
  *   CORS_ORIGIN         optional — defaults to * (every route is token-checked)
  *   PGSSL_NO_VERIFY     optional — set to 1 only if your provider uses a
@@ -452,8 +465,20 @@ async function handleRequest(req, res) {
   /* Health is answered without touching the database so it stays useful when
      the database is the thing that is broken. */
   if (route === 'health' && method === 'GET') {
-    let dbOk = false, dbError = null;
-    try { await withDb(async (c) => { await c.query('SELECT 1'); }); dbOk = true; }
+    let dbOk = false, dbError = null, encoding = null, encodingOk = null;
+    try {
+      await withDb(async (c) => {
+        await c.query('SELECT 1');
+        /* A non-UTF8 database silently cannot hold the rupee sign, so report
+           it here rather than letting the first save fail mysteriously. */
+        try {
+          const e = await c.query('SELECT pg_encoding_to_char(encoding) AS enc FROM pg_database WHERE datname = current_database()');
+          encoding = e.rows.length ? e.rows[0].enc : null;
+          encodingOk = encoding ? /^UTF8$/i.test(encoding) : null;
+        } catch (e2) { /* not fatal; the connection itself is what matters */ }
+      });
+      dbOk = true;
+    }
     catch (e) { dbError = e.message; }
     return send(res, dbOk ? 200 : 503, {
       ok: dbOk,
@@ -462,6 +487,11 @@ async function handleRequest(req, res) {
       time: nowIso(),
       database: dbOk ? 'connected' : 'unavailable',
       databaseError: dbError,
+      encoding: encoding,
+      encodingOk: encodingOk,
+      encodingWarning: encodingOk === false
+        ? 'This database is ' + encoding + ', not UTF8, so it cannot store the ₹ sign. Recreate it with UTF8 encoding.'
+        : null,
       googleSignIn: !!process.env.GOOGLE_CLIENT_ID,
       accessPolicy: (process.env.ALLOWED_EMAILS || '').trim()
         ? 'allowlist'
@@ -822,7 +852,17 @@ async function handleRequest(req, res) {
   } catch (err) {
     const status = err && err.status ? err.status : 500;
     if (status === 500) console.error('money-manager api:', err && err.message);
-    /* Never leak a connection string or SQL in an error shown to a browser. */
+    /* Never leak a connection string or SQL in an error shown to a browser —
+       but a database that cannot store the text we send is worth naming,
+       because "something went wrong" would send someone hunting for hours. */
+    const msg = String((err && err.message) || '');
+    if (/has no equivalent in encoding|invalid byte sequence|character with byte sequence/i.test(msg)) {
+      return send(res, 500, {
+        error: 'This database cannot store the characters the app uses (for example the ₹ sign). ' +
+          'It needs to be created with UTF8 encoding — most hosted Postgres already is. ' +
+          'Check GET /api/v1/health for the encoding it reports.'
+      });
+    }
     send(res, status, {
       error: status === 500
         ? 'Something went wrong on the server. Nothing was saved.'

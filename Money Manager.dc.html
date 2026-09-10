@@ -1631,7 +1631,7 @@ class Component extends DCLogic {
     startTab = MM_TAB_ALIAS[startTab] || startTab;
     if (MM_TABS.indexOf(startTab) < 0) startTab = 'Ledger';
     this.state = {
-      db: mmSeed(), store: 'seeding…', tab: startTab, ttype: 'all', chartMode: 'expense',
+      db: mmSeed(), store: 'connecting…', tab: startTab, ttype: 'all', chartMode: 'expense',
       f: { from: first, to: last, acct: '', cat: '', sub: '', q: '', min: '', max: '', pay: '', tag: '', recon: '' },
       preset: 'This Month', groupBy: '', sort: { k: 'date', d: 1 }, sel: [], cursor: -1,
       colW: {}, colOrder: Object.keys(MM_COLS), colShow: MM_COLS_DEFAULT.slice(),
@@ -1796,6 +1796,7 @@ class Component extends DCLogic {
       sel: [], cursor: -1, recon: null, dlg: null, confirm: null, menu: null, edit: null,
       locked: false, unlock: '', lockTries: 0, lockUntil: 0, snaps2: [],
       saveState: 'saved', saveError: '', savedAt: Date.now(),
+      store: 'cloud · ' + (this.apiBase() || 'server'),
       auth: Object.assign({}, this.state.auth, {
         phase: 'ready', userId: user.id, name: user.name || user.email, email: user.email || '',
         colour: MM_USER_COLOURS[Math.abs(String(user.id || '').charCodeAt(0) || 0) % MM_USER_COLOURS.length],
