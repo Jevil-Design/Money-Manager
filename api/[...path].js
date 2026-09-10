@@ -32,7 +32,24 @@
 
 const crypto = require('crypto');
 const zlib = require('zlib');
-const { Client } = require('pg');
+
+/* The Postgres driver is loaded on first use, not at import.  Anything that
+   throws while the module is being imported becomes an opaque
+   FUNCTION_INVOCATION_FAILED page with no usable message, so the one dependency
+   that could be missing is resolved lazily and reported as readable JSON. */
+let pgClient = null;
+function getClientClass() {
+  if (pgClient) return pgClient;
+  try {
+    pgClient = require('pg').Client;
+  } catch (err) {
+    const e = new Error('The "pg" package is not installed in this deployment. ' +
+      'Check that package.json at the repository root lists it and that the build installed dependencies.');
+    e.status = 503;
+    throw e;
+  }
+  return pgClient;
+}
 
 const KEEP_SNAPSHOTS = Math.max(1, parseInt(process.env.KEEP_SNAPSHOTS || '40', 10));
 const CORS_ORIGIN = process.env.CORS_ORIGIN || '*';
@@ -58,6 +75,7 @@ async function withDb(fn) {
     err.status = 503;
     throw err;
   }
+  const Client = getClientClass();
   const local = /@(localhost|127\.0\.0\.1)[:/]/.test(url);
   const client = new Client({
     connectionString: url,
@@ -316,7 +334,7 @@ function balancesFrom(payload) {
 
 /* --------------------------------------------------------------- the handler */
 
-module.exports = async function handler(req, res) {
+async function handleRequest(req, res) {
   res.setHeader('Access-Control-Allow-Origin', CORS_ORIGIN);
   res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type, X-Device, X-Api-Token, X-Mm-Encoding');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
@@ -531,4 +549,25 @@ module.exports = async function handler(req, res) {
 /* Take the body ourselves so a compressed push is not rejected by a default
    parser limit before the function sees it.  Vercel still enforces its own
    platform cap on the incoming request, which gzip keeps us well under. */
+/* Nothing may escape as an unhandled rejection: that is what turns a small
+   mistake into an opaque FUNCTION_INVOCATION_FAILED page with no message.
+   Every failure leaves here as readable JSON instead. */
+module.exports = async function handler(req, res) {
+  try {
+    await handleRequest(req, res);
+  } catch (err) {
+    console.error("money-manager api (unhandled):", (err && err.stack) || err);
+    try {
+      const status = err && err.status ? err.status : 500;
+      send(res, status, {
+        error: status === 500
+          ? "Something went wrong on the server. Nothing was saved."
+          : err.message
+      });
+    } catch (e) {
+      try { res.statusCode = 500; res.end(String.fromCharCode(123) + JSON.stringify("error") + ":" + JSON.stringify("server error") + String.fromCharCode(125)); } catch (e2) { /* nothing left to do */ }
+    }
+  }
+};
+
 module.exports.config = { api: { bodyParser: false } };
