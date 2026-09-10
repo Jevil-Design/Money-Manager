@@ -32,7 +32,9 @@
  * devices cannot silently overwrite each other.
  *
  * Environment:
- *   POSTGRES_URL        required — any Postgres (Vercel/Neon, Supabase, RDS…)
+ *   POSTGRES_URL        required — any Postgres (Vercel/Neon, Supabase, RDS…).
+ *                       DATABASE_URL and the other names in DB_URL_VARS are
+ *                       accepted too, since each provider sets its own.
  *   GOOGLE_CLIENT_ID    optional — enables the Google sign-in button
  *   ALLOWED_EMAILS      optional — who may register. Unset: the first account
  *                       to register claims the deployment and later ones are refused.
@@ -73,9 +75,42 @@ const sha = (s) => crypto.createHash('sha256').update(typeof s === 'string' ? s 
 
 /* ------------------------------------------------------------------ storage */
 
+/* Every name a Postgres provider is known to set on Vercel.  Attaching a
+   database and still being told none is configured is a miserable dead end,
+   so accept whichever name the provider chose: the Vercel/Neon marketplace
+   integration sets DATABASE_URL and POSTGRES_URL, Supabase sets POSTGRES_URL,
+   and the unpooled variants are what a serverless function actually wants.
+   Order matters only in that a direct connection is preferred over a pooled
+   one; any of them will work. */
+const DB_URL_VARS = [
+  'POSTGRES_URL',
+  'POSTGRES_URL_NON_POOLING',
+  'DATABASE_URL',
+  'DATABASE_URL_UNPOOLED',
+  'POSTGRES_PRISMA_URL',
+  'NEON_DATABASE_URL',
+  'PG_CONNECTION_STRING'
+];
+
 function connectionString() {
-  return process.env.POSTGRES_URL || process.env.DATABASE_URL ||
-    process.env.POSTGRES_URL_NON_POOLING || '';
+  for (let i = 0; i < DB_URL_VARS.length; i++) {
+    const v = process.env[DB_URL_VARS[i]];
+    if (v && String(v).trim()) return String(v).trim();
+  }
+  return '';
+}
+
+/* Which of those names are actually set — NAMES ONLY.  A connection string
+   contains the database password, so the value never leaves the server. */
+function dbVarsPresent() {
+  return DB_URL_VARS.filter((n) => process.env[n] && String(process.env[n]).trim());
+}
+
+function noDatabaseMessage() {
+  return 'No database is configured. Add a Postgres database to this Vercel ' +
+    'project (Storage → Create → Postgres → Connect), or set POSTGRES_URL ' +
+    'yourself under Settings → Environment Variables, then redeploy. ' +
+    'Accepted variable names: ' + DB_URL_VARS.join(', ') + '.';
 }
 
 /* One short-lived client per invocation.  Serverless containers are frozen
@@ -84,7 +119,7 @@ function connectionString() {
 async function withDb(fn) {
   const url = connectionString();
   if (!url) {
-    const err = new Error('No database is configured. Set POSTGRES_URL in the Vercel project settings.');
+    const err = new Error(noDatabaseMessage());
     err.status = 503;
     throw err;
   }
@@ -555,6 +590,12 @@ async function handleRequest(req, res) {
       time: nowIso(),
       database: dbOk ? 'connected' : 'unavailable',
       databaseError: dbError,
+      /* Names only, never values — a connection string holds the password.
+         This is here so 'I attached a database and it still says none is
+         configured' can be answered in one look: either the name the
+         provider set is not one we read, or the deployment predates it. */
+      databaseUrlVarsSet: dbVarsPresent(),
+      databaseUrlVarsAccepted: DB_URL_VARS,
       encoding: encoding,
       encodingOk: encodingOk,
       encodingWarning: encodingOk === false

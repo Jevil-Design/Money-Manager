@@ -40,6 +40,15 @@ Bringing your own (Supabase, RDS, a VPS) works too — add `POSTGRES_URL` under
 POSTGRES_URL = postgres://user:password@host:5432/dbname?sslmode=require
 ```
 
+Whichever name your provider sets is fine. Any of these is read, in this
+order: `POSTGRES_URL`, `POSTGRES_URL_NON_POOLING`, `DATABASE_URL`,
+`DATABASE_URL_UNPOOLED`, `POSTGRES_PRISMA_URL`, `NEON_DATABASE_URL`,
+`PG_CONNECTION_STRING`.
+
+**Environment variables only reach the running app on the next deployment.**
+After attaching a database or adding a variable, redeploy — otherwise the app
+still reports that no database is configured.
+
 **It must be UTF8.** A database created with a Windows/Latin-1 encoding cannot
 store the ₹ sign and every save will fail. Hosted Postgres is UTF8 already;
 `/api/v1/health` reports the encoding so you can check.
@@ -95,6 +104,7 @@ curl https://your-project.vercel.app/api/v1/health
 {
   "ok": true,
   "database": "connected",
+  "databaseUrlVarsSet": ["POSTGRES_URL"],
   "encoding": "UTF8",
   "encodingOk": true,
   "accessPolicy": "allowlist",
@@ -102,7 +112,11 @@ curl https://your-project.vercel.app/api/v1/health
 }
 ```
 
-- `database: "unavailable"` → `POSTGRES_URL` is missing or wrong.
+- `database: "unavailable"` with an empty `databaseUrlVarsSet` → no database
+  variable is set at all, or you have not redeployed since setting it.
+- `database: "unavailable"` but `databaseUrlVarsSet` is non-empty → the
+  connection string is there but the database refused it; `databaseError`
+  says why. Variable *names* are reported, never their values.
 - `encodingOk: false` → the database is not UTF8; recreate it with UTF8.
 
 ## Two devices at once
