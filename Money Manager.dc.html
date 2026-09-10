@@ -4237,10 +4237,15 @@ class Component extends DCLogic {
     var defs = [
       { k: 'catexp', l: 'Expense by category' }, { k: 'subexp', l: 'Expense by sub-category' }, { k: 'catinc', l: 'Income by category' },
       { k: 'ie', l: 'Income vs Expense' }, { k: 'monthly', l: 'Monthly summary' }, { k: 'annual', l: 'Annual summary' },
-      { k: 'acct', l: 'Account summary' }, { k: 'budget', l: 'Budget vs actual' }, { k: 'cash', l: 'Cash flow' },
-      { k: 'net', l: 'Net worth' }, { k: 'cards', l: 'Credit card summary' }
+      { k: 'yoy', l: 'Year on year' }, { k: 'acct', l: 'Account summary' }, { k: 'budget', l: 'Budget vs actual' },
+      { k: 'cash', l: 'Cash flow' }, { k: 'net', l: 'Net worth' }, { k: 'trend', l: 'Net worth trend' },
+      { k: 'cards', l: 'Credit card summary' }, { k: 'loans', l: 'Loan summary' }, { k: 'interest', l: 'Interest paid' },
+      { k: 'fixvar', l: 'Fixed vs variable' }, { k: 'recurexp', l: 'Recurring expenses' }, { k: 'savings', l: 'Savings rate' },
+      { k: 'payment', l: 'By payment method' }, { k: 'tags', l: 'By tag' }, { k: 'reimb', l: 'Reimbursable' }
     ];
     var tools = defs.map(function (d) { return self.btn(d.l, function () { self.setState({ report: d.k }); }, s.report === d.k ? 'active' : null); });
+    tools.push(this.btn('⤓ Export CSV', function () { self.exportReport(); }));
+    tools.push(this.btn('🖶 Print', function () { self.doPrint(); }));
     var cols = [], rows = [], bars = [], title = '', sub = this.state.f.from + ' ~ ' + this.state.f.to, panels = [];
 
     function grouped(type, bySub) {
