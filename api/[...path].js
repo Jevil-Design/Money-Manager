@@ -127,6 +127,36 @@ CREATE TABLE IF NOT EXISTS mm_sync_log (
   created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS mm_sync_log_user_idx ON mm_sync_log (user_id, id DESC);
+
+/* --- email + password sign-in, so an account works from any device --- */
+ALTER TABLE mm_user ADD COLUMN IF NOT EXISTS salt        TEXT;
+ALTER TABLE mm_user ADD COLUMN IF NOT EXISTS pw_hash     TEXT;
+ALTER TABLE mm_user ADD COLUMN IF NOT EXISTS pw_iters    INTEGER;
+ALTER TABLE mm_user ADD COLUMN IF NOT EXISTS pw_algo     TEXT;
+ALTER TABLE mm_user ADD COLUMN IF NOT EXISTS fail_count  INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE mm_user ADD COLUMN IF NOT EXISTS locked_until TIMESTAMPTZ;
+
+/* Session tokens.  Only the digest is stored, so a database dump cannot be
+   replayed as a login. */
+CREATE TABLE IF NOT EXISTS mm_token (
+  id          TEXT PRIMARY KEY,
+  user_id     TEXT NOT NULL REFERENCES mm_user(id) ON DELETE CASCADE,
+  device      TEXT NOT NULL DEFAULT 'unknown',
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  last_used   TIMESTAMPTZ NOT NULL DEFAULT now(),
+  expires_at  TIMESTAMPTZ NOT NULL
+);
+CREATE INDEX IF NOT EXISTS mm_token_user_idx ON mm_token (user_id);
+
+/* The live document: one row per account, replaced on every save.  The rev column
+   makes concurrent edits from two devices detectable instead of silent. */
+CREATE TABLE IF NOT EXISTS mm_state (
+  user_id     TEXT PRIMARY KEY REFERENCES mm_user(id) ON DELETE CASCADE,
+  data        JSONB NOT NULL,
+  rev         BIGINT NOT NULL DEFAULT 1,
+  device      TEXT NOT NULL DEFAULT 'unknown',
+  updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 `;
 
 /* The tables are created on first use rather than by a separate migration
@@ -211,15 +241,86 @@ async function readJsonBody(req) {
 
 async function authenticate(client, req) {
   const header = req.headers.authorization || '';
-  const token = header.replace(/^Bearer\s+/i, '').trim() || req.headers['x-api-token'] || '';
+  const token = (header.replace(/^Bearer\s+/i, '').trim() || req.headers['x-api-token'] || '').trim();
   if (!token) {
     const e = new Error('Missing API token.'); e.status = 401; throw e;
   }
-  const { rows } = await query(client, 'SELECT * FROM mm_user WHERE token_hash = $1', [sha(String(token))]);
-  if (!rows.length) {
-    const e = new Error('That API token is not recognised.'); e.status = 401; throw e;
+  const digest = sha(token);
+
+  /* Session tokens issued by email/password or Google sign-in. */
+  const sess = await query(client,
+    `SELECT u.*, t.expires_at FROM mm_token t JOIN mm_user u ON u.id = t.user_id
+      WHERE t.id = $1 AND t.expires_at > now()`, [digest]);
+  if (sess.rows.length) {
+    /* Sliding expiry: an account in daily use never gets logged out. */
+    await query(client,
+      'UPDATE mm_token SET last_used = now(), expires_at = now() + INTERVAL \'30 days\' WHERE id = $1',
+      [digest]).catch(() => {});
+    return sess.rows[0];
   }
-  return rows[0];
+
+  /* Long-lived API tokens from the original design still work. */
+  const legacy = await query(client, 'SELECT * FROM mm_user WHERE token_hash = $1', [digest]);
+  if (legacy.rows.length) return legacy.rows[0];
+
+  const e = new Error('Your session has expired — please sign in again.'); e.status = 401; throw e;
+}
+
+/* ---------------------------------------------------- password + sessions */
+
+const PW_ITERS = 210000;                    /* OWASP guidance for PBKDF2-SHA256 */
+
+function pbkdf2(password, saltB64, iters) {
+  return new Promise((resolve, reject) => {
+    crypto.pbkdf2(String(password), Buffer.from(saltB64, 'base64'), iters, 32, 'sha256',
+      (err, key) => (err ? reject(err) : resolve(key.toString('hex'))));
+  });
+}
+function newSalt() { return crypto.randomBytes(16).toString('base64'); }
+function timingSafeEqual(a, b) {
+  const x = Buffer.from(String(a || ''), 'utf8');
+  const y = Buffer.from(String(b || ''), 'utf8');
+  if (x.length !== y.length) return false;
+  return crypto.timingSafeEqual(x, y);
+}
+function passwordProblem(pw) {
+  pw = String(pw || '');
+  if (pw.length < 8) return 'Use at least 8 characters.';
+  if (!/[a-zA-Z]/.test(pw)) return 'Include at least one letter.';
+  if (!/[0-9]/.test(pw)) return 'Include at least one number.';
+  return '';
+}
+function normEmail(e) { return String(e || '').trim().toLowerCase(); }
+
+/* Issue a session token.  The caller gets the only copy; we keep its digest. */
+async function issueSession(client, userId, device) {
+  const token = crypto.randomBytes(32).toString('base64url');
+  await query(client,
+    `INSERT INTO mm_token (id, user_id, device, expires_at)
+     VALUES ($1,$2,$3, now() + INTERVAL '30 days')`,
+    [sha(token), userId, String(device || 'unknown').slice(0, 120)]);
+  /* Keep the table tidy: drop this account's expired rows. */
+  await query(client, 'DELETE FROM mm_token WHERE user_id = $1 AND expires_at < now()', [userId]).catch(() => {});
+  return token;
+}
+
+function publicUser(u) {
+  return { id: u.id, email: u.email, name: u.name || '', createdAt: u.created_at };
+}
+
+/* Wrong passwords cost time, and after enough of them the account pauses.
+   Without this a public URL is an open guessing target. */
+async function noteFailure(client, user) {
+  const n = (user.fail_count || 0) + 1;
+  const lock = n % 5 === 0 ? Math.min(300, 15 * Math.pow(2, Math.floor(n / 5) - 1)) : 0;
+  await query(client,
+    `UPDATE mm_user SET fail_count = $1, locked_until = CASE WHEN $2 > 0
+        THEN now() + ($2 || ' seconds')::interval ELSE locked_until END WHERE id = $3`,
+    [n, lock, user.id]).catch(() => {});
+  return lock;
+}
+async function clearFailures(client, userId) {
+  await query(client, 'UPDATE mm_user SET fail_count = 0, locked_until = NULL WHERE id = $1', [userId]).catch(() => {});
 }
 
 /* ------------------------------------------------------------------- google */
@@ -373,8 +474,195 @@ async function handleRequest(req, res) {
     await withDb(async (client) => {
       if (route === 'auth/google' && method === 'POST') return authGoogle(client, req, res);
 
+      /* ---- create an account (email + password) ---- */
+      if (route === 'auth/register' && method === 'POST') {
+        let body;
+        try { body = (await readJsonBody(req)) || {}; }
+        catch (e) { return send(res, 400, { error: 'The request could not be read.' }); }
+        const email = normEmail(body.email);
+        const name = String(body.name || '').trim().slice(0, 60);
+        if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+          return send(res, 422, { error: 'Enter a valid email address.' });
+        }
+        if (!name) return send(res, 422, { error: 'Enter the name you want to be known by.' });
+        const bad = passwordProblem(body.password);
+        if (bad) return send(res, 422, { error: bad });
+
+        const existing = await query(client, 'SELECT id FROM mm_user WHERE email = $1', [email]);
+        if (existing.rows.length) {
+          return send(res, 409, { error: 'There is already an account with that email address. Sign in instead.' });
+        }
+        if (!(await claimAccount(client, email))) {
+          return send(res, 403, {
+            error: 'This server is not accepting new accounts. Add ' + email +
+              ' to ALLOWED_EMAILS in the Vercel project settings to let it in.'
+          });
+        }
+        const salt = newSalt();
+        const hash = await pbkdf2(body.password, salt, PW_ITERS);
+        const id = uid();
+        await query(client,
+          `INSERT INTO mm_user (id, email, name, token_hash, salt, pw_hash, pw_iters, pw_algo, created_at, updated_at)
+           VALUES ($1,$2,$3,'',$4,$5,$6,'pbkdf2-sha256',$7,$7)`,
+          [id, email, name, salt, hash, PW_ITERS, nowIso()]);
+        const token = await issueSession(client, id, req.headers['x-device']);
+        const u = await query(client, 'SELECT * FROM mm_user WHERE id = $1', [id]);
+        return send(res, 200, { token: token, user: publicUser(u.rows[0]), state: null });
+      }
+
+      /* ---- sign in ---- */
+      if (route === 'auth/login' && method === 'POST') {
+        let body;
+        try { body = (await readJsonBody(req)) || {}; }
+        catch (e) { return send(res, 400, { error: 'The request could not be read.' }); }
+        const email = normEmail(body.email);
+        if (!email || !body.password) return send(res, 422, { error: 'Enter your email and password.' });
+
+        const found = await query(client, 'SELECT * FROM mm_user WHERE email = $1', [email]);
+        if (!found.rows.length) {
+          /* Spend comparable time so a missing account is not detectable. */
+          await pbkdf2(String(body.password), newSalt(), PW_ITERS);
+          return send(res, 401, { error: 'That email and password don’t match an account.' });
+        }
+        const user = found.rows[0];
+        if (user.locked_until && new Date(user.locked_until) > new Date()) {
+          const secs = Math.ceil((new Date(user.locked_until) - new Date()) / 1000);
+          return send(res, 429, { error: 'Too many attempts. Try again in ' + secs + ' second(s).' });
+        }
+        if (!user.pw_hash) {
+          return send(res, 409, { error: 'This account was created with Google sign-in — use that button instead.' });
+        }
+        const hash = await pbkdf2(body.password, user.salt, user.pw_iters || PW_ITERS);
+        if (!timingSafeEqual(hash, user.pw_hash)) {
+          const lock = await noteFailure(client, user);
+          return send(res, 401, {
+            error: lock
+              ? 'That email and password don’t match. Too many attempts — paused for ' + lock + ' seconds.'
+              : 'That email and password don’t match an account.'
+          });
+        }
+        await clearFailures(client, user.id);
+        const token = await issueSession(client, user.id, req.headers['x-device']);
+        return send(res, 200, { token: token, user: publicUser(user) });
+      }
+
       const user = await authenticate(client, req);
       const device = String(req.headers['x-device'] || 'unknown').slice(0, 120);
+
+      /* ---- session ---- */
+      if (route === 'auth/session' && method === 'GET') {
+        const st = await query(client, 'SELECT rev, updated_at, device FROM mm_state WHERE user_id = $1', [user.id]);
+        return send(res, 200, {
+          user: publicUser(user),
+          state: st.rows.length ? { rev: Number(st.rows[0].rev), updatedAt: st.rows[0].updated_at, device: st.rows[0].device } : null
+        });
+      }
+      if (route === 'auth/logout' && method === 'POST') {
+        const header = req.headers.authorization || '';
+        const token = (header.replace(/^Bearer\s+/i, '').trim() || req.headers['x-api-token'] || '').trim();
+        await query(client, 'DELETE FROM mm_token WHERE id = $1', [sha(token)]);
+        return send(res, 200, { ok: true });
+      }
+      /* Signing out everywhere is the remedy if a device is lost. */
+      if (route === 'auth/logout-all' && method === 'POST') {
+        await query(client, 'DELETE FROM mm_token WHERE user_id = $1', [user.id]);
+        return send(res, 200, { ok: true });
+      }
+      if (route === 'auth/password' && method === 'POST') {
+        let body;
+        try { body = (await readJsonBody(req)) || {}; }
+        catch (e) { return send(res, 400, { error: 'The request could not be read.' }); }
+        const bad = passwordProblem(body.next);
+        if (bad) return send(res, 422, { error: bad });
+        if (!user.pw_hash) return send(res, 409, { error: 'This account has no password to change.' });
+        const cur = await pbkdf2(body.current, user.salt, user.pw_iters || PW_ITERS);
+        if (!timingSafeEqual(cur, user.pw_hash)) return send(res, 401, { error: 'Your current password doesn’t match.' });
+        const salt = newSalt();
+        const hash = await pbkdf2(body.next, salt, PW_ITERS);
+        await query(client,
+          'UPDATE mm_user SET salt = $1, pw_hash = $2, pw_iters = $3, pw_algo = $4, updated_at = $5 WHERE id = $6',
+          [salt, hash, PW_ITERS, 'pbkdf2-sha256', nowIso(), user.id]);
+        /* Every other device must sign in again with the new password. */
+        const header = req.headers.authorization || '';
+        const keep = sha((header.replace(/^Bearer\s+/i, '').trim() || req.headers['x-api-token'] || '').trim());
+        await query(client, 'DELETE FROM mm_token WHERE user_id = $1 AND id <> $2', [user.id, keep]);
+        return send(res, 200, { ok: true });
+      }
+
+      /* ---- delete the whole account ---- */
+      if (route === 'auth/account' && method === 'DELETE') {
+        let body;
+        try { body = (await readJsonBody(req)) || {}; }
+        catch (e) { return send(res, 400, { error: 'The request could not be read.' }); }
+        if (user.pw_hash) {
+          const cur = await pbkdf2(body.password, user.salt, user.pw_iters || PW_ITERS);
+          if (!timingSafeEqual(cur, user.pw_hash)) return send(res, 401, { error: 'That password doesn’t match.' });
+        }
+        /* Every dependent row cascades from mm_user. */
+        await query(client, 'DELETE FROM mm_user WHERE id = $1', [user.id]);
+        return send(res, 200, { deleted: true });
+      }
+
+      /* ---- the live document ------------------------------------------------
+         This is where the books actually live now.  GET returns the whole
+         thing with its revision; PUT replaces it but only if the caller was
+         holding the current revision, so two devices cannot quietly
+         overwrite one another. */
+      if (route === 'state' && method === 'GET') {
+        const st = await query(client, 'SELECT data, rev, updated_at, device FROM mm_state WHERE user_id = $1', [user.id]);
+        if (!st.rows.length) return send(res, 200, { rev: 0, data: null });
+        return send(res, 200, {
+          rev: Number(st.rows[0].rev), data: st.rows[0].data,
+          updatedAt: st.rows[0].updated_at, device: st.rows[0].device
+        });
+      }
+      if (route === 'state' && method === 'PUT') {
+        let body;
+        try { body = (await readJsonBody(req)) || {}; }
+        catch (e) { return send(res, 400, { error: 'The save could not be read. Nothing was changed.', detail: String(e.message) }); }
+        const data = body.data;
+        if (!data || !Array.isArray(data.accounts) || !Array.isArray(data.txns)) {
+          return send(res, 422, { error: 'The document must contain accounts[] and txns[].' });
+        }
+        const claimed = Number(body.rev || 0);
+        const device = String(body.device || req.headers['x-device'] || 'unknown').slice(0, 120);
+        const cur = await query(client, 'SELECT rev, updated_at, device FROM mm_state WHERE user_id = $1', [user.id]);
+        const serverRev = cur.rows.length ? Number(cur.rows[0].rev) : 0;
+        if (serverRev !== claimed && !body.force) {
+          return send(res, 409, {
+            error: 'This account was changed somewhere else since you loaded it.',
+            serverRev: serverRev, yourRev: claimed,
+            updatedAt: cur.rows.length ? cur.rows[0].updated_at : null,
+            device: cur.rows.length ? cur.rows[0].device : null
+          });
+        }
+        const nextRev = serverRev + 1;
+        const json = JSON.stringify(data);
+        await query(client,
+          `INSERT INTO mm_state (user_id, data, rev, device, updated_at)
+           VALUES ($1,$2,$3,$4, now())
+           ON CONFLICT (user_id) DO UPDATE SET data = excluded.data, rev = excluded.rev,
+             device = excluded.device, updated_at = excluded.updated_at`,
+          [user.id, json, nextRev, device]);
+        /* Automatic version history: keep a snapshot if the last one is old,
+           because there is no copy in the browser to fall back on. */
+        const last = await query(client,
+          'SELECT created_at FROM mm_snapshot WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1', [user.id]);
+        const stale = !last.rows.length ||
+          (Date.now() - new Date(last.rows[0].created_at).getTime()) > 6 * 3600 * 1000;
+        if (stale) {
+          await query(client,
+            `INSERT INTO mm_snapshot (id, user_id, label, device, byte_size, txn_count, checksum, payload, created_at)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+            [uid(), user.id, 'automatic', device, Buffer.byteLength(json), data.txns.length, sha(json), json, nowIso()]
+          ).catch(() => {});
+          await query(client,
+            `DELETE FROM mm_snapshot WHERE user_id = $1 AND id NOT IN (
+               SELECT id FROM mm_snapshot WHERE user_id = $1 ORDER BY created_at DESC LIMIT $2)`,
+            [user.id, KEEP_SNAPSHOTS]).catch(() => {});
+        }
+        return send(res, 200, { rev: nextRev, savedAt: nowIso(), transactions: data.txns.length, bytes: Buffer.byteLength(json) });
+      }
 
       /* ---- identity ---- */
       if (route === 'me' && method === 'GET') {
