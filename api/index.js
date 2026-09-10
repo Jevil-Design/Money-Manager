@@ -205,7 +205,18 @@ async function query(client, sql, params) {
 
 /* -------------------------------------------------------------- request I/O */
 
-function send(res, status, body) {
+/* An answer can be decided before the request body has been read — a rejected
+   token, say.  On a keep-alive connection the unread body would then be parsed
+   as the start of the next request, which the peer answers with a bare 400.
+   Vercel gives each invocation its own request so it never bit there, but the
+   local server and any self-hosted use do reuse connections, so drain first. */
+function drain(req) {
+  if (!req || !req.readable || req.readableEnded) return;
+  try { req.resume(); } catch (e) { /* nothing left to read */ }
+}
+
+function send(res, status, body, req) {
+  drain(req || (res && res.req));
   res.statusCode = status;
   res.setHeader('Content-Type', 'application/json; charset=utf-8');
   res.setHeader('Cache-Control', 'no-store');
@@ -446,19 +457,76 @@ function balancesFrom(payload) {
   return { accounts: live, netWorth };
 }
 
+/* ------------------------------------------------------------------- routing */
+
+/* 'v1', 'v2' ... — the API version segment, which is not part of a route. */
+function isVersionSeg(seg) {
+  if (!seg || seg.length < 2 || seg.charAt(0) !== 'v') return false;
+  for (var i = 1; i < seg.length; i++) {
+    var c = seg.charCodeAt(i);
+    if (c < 48 || c > 57) return false;
+  }
+  return true;
+}
+
+/* Which endpoint is being asked for?  Three routing shapes have to work,
+   because how a request reaches this file depends on the deployment:
+
+     1. rewritten   /api/v1/state  ->  /api/index?mmpath=v1/state
+     2. dynamic     a [...path] route hands the segments to req.query.path
+     3. direct      a local server, or /api/health with no rewrite at all
+
+   Nested paths silently 404'd when only (2) was implemented, so all three
+   are read here in order of how explicit they are.  A leading 'api',
+   'index' or version segment is dropped so every shape ends up identical. */
+function routeSegments(req) {
+  const url = String(req.url || '');
+  const qmark = url.indexOf('?');
+  const pathname = qmark < 0 ? url : url.slice(0, qmark);
+  const search = qmark < 0 ? '' : url.slice(qmark + 1);
+
+  const decode = (p) => { try { return decodeURIComponent(p); } catch (e) { return p; } };
+  const split = (v) => String(v).split('/').map(decode).filter(Boolean);
+
+  let segs = null;
+
+  /* 1. the rewrite tells us plainly.  Read it out of the raw query string so
+        this does not depend on the platform's req.query helper existing. */
+  let mm = null;
+  if (req.query && typeof req.query.mmpath === 'string') mm = req.query.mmpath;
+  if (mm === null && search) {
+    search.split('&').forEach((pair) => {
+      const eq = pair.indexOf('=');
+      const key = eq < 0 ? pair : pair.slice(0, eq);
+      if (key === 'mmpath') mm = eq < 0 ? '' : pair.slice(eq + 1).split('+').join(' ');
+    });
+  }
+  if (mm !== null && String(mm).length) segs = split(mm);
+
+  /* 2. a [...path] dynamic route */
+  if (!segs && req.query && req.query.path) {
+    const parts = req.query.path;
+    segs = (Array.isArray(parts) ? parts : [parts]).filter(Boolean)
+      .reduce((acc, p) => acc.concat(split(p)), []);
+  }
+
+  /* 3. whatever the URL says */
+  if (!segs) segs = split(pathname);
+
+  while (segs.length && (segs[0] === 'api' || segs[0] === 'index' || isVersionSeg(segs[0]))) segs.shift();
+  return segs;
+}
+
 /* --------------------------------------------------------------- the handler */
 
 async function handleRequest(req, res) {
   res.setHeader('Access-Control-Allow-Origin', CORS_ORIGIN);
   res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type, X-Device, X-Api-Token, X-Mm-Encoding');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
   res.setHeader('Vary', 'Origin');
   if (req.method === 'OPTIONS') { res.statusCode = 204; res.end(); return; }
 
-  /* /api/v1/backup/latest -> ['backup','latest'] */
-  const parts = (req.query && req.query.path) || [];
-  const segs = (Array.isArray(parts) ? parts : [parts]).filter(Boolean);
-  if (segs[0] === 'v1') segs.shift();
+  const segs = routeSegments(req);
   const route = segs.join('/');
   const method = req.method || 'GET';
 

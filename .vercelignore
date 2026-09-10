@@ -2,7 +2,7 @@
 # long-running Express process with a SQLite file on a mounted volume. Vercel
 # runs serverless functions on a read-only filesystem with no persistent disk,
 # so deploying it here would crash on start and could not store backups anyway.
-# Excluding it makes this deployment a plain static site.
+# Excluding it leaves the serverless function in api/ as the only backend.
 server/
 
 # Design-canvas scratch files, not needed by the app.

@@ -5,7 +5,12 @@ One project serves two things:
 | Path | What it is |
 |---|---|
 | `/` | the app — a static page, rewritten to `Money Manager.dc.html` |
-| `/api/v1/*` | the API and the database, one serverless function in `api/` |
+| `/api/v1/*` | the API and the database, one serverless function: `api/index.js` |
+
+`vercel.json` rewrites every `/api/...` path to that one function, carrying the
+path along as `mmpath`. That rewrite is load-bearing — without it only
+single-segment paths like `/api/health` arrive and everything under
+`/api/v1/...` returns Vercel’s own 404.
 
 **Your data lives in the cloud database, not in the browser.** Sign in with the
 same email and password on any computer or phone and the same books open. The
