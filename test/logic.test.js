@@ -116,6 +116,74 @@ ok('progress is shown as a notice, not an error', v.hasAuthNotice === true && v.
 v = mk({ phase: 'signup', notice: 'x', error: 'y' });
 ok('an error wins over a stale notice', v.hasAuthNotice === false && v.hasAuthError === true);
 
+console.log('\nThe forgot-password and reset screens render in every state');
+v = mk({ phase: 'login', resetAvailable: false });
+ok('the link is hidden when the server cannot send email', v.resetAvailable === false);
+ok('and the sign-in screen is otherwise unchanged', v.isLogin === true && v.isForgot === false);
+
+v = mk({ phase: 'login', resetAvailable: true });
+ok('the link appears once the server says email works', v.resetAvailable === true);
+ok('it has something to click', typeof v.goForgot === 'function');
+
+v = mk({ phase: 'forgot', resetAvailable: true });
+ok('the forgot screen shows', v.isForgot === true && v.needsAuth === true);
+ok('it is titled for resetting', /reset/i.test(v.authTitle), v.authTitle);
+ok('it says a code will be emailed', /email a code/i.test(v.authSubtitle), v.authSubtitle);
+ok('it names the expiry', v.resetMinutes === 15);
+ok('the button reads plainly', v.forgotLabel === 'Email me a code', v.forgotLabel);
+v = mk({ phase: 'forgot', busy: true });
+ok('while sending, the button is held and says so',
+  v.authBusy === true && v.forgotLabel === 'Sending…', v.forgotLabel);
+
+v = mk({ phase: 'reset', resetToken: '' });
+ok('the reset screen shows', v.isReset === true && v.needsAuth === true);
+ok('typing the code by hand asks for the address too', v.resetNeedsEmail === true);
+ok('and does not claim a link was used', v.resetFromLink === false);
+ok('it reassures that no data is lost', /not encrypted with your password/i.test(v.authSubtitle),
+  v.authSubtitle);
+ok('the button reads plainly', v.resetLabel === 'Set new password', v.resetLabel);
+
+v = mk({ phase: 'reset', resetToken: 'a-token-from-the-link' });
+ok('arriving by link needs no address or code', v.resetNeedsEmail === false);
+ok('and says the link was recognised', v.resetFromLink === true);
+
+v = mk({ phase: 'reset', resetToken: 'x', form: { password: 'abc', password2: 'xyz', code: '' } });
+ok('a weak new password is marked on the field', /b98a8a/.test(v.pwFieldStyle));
+ok('a mismatched repeat is marked on the field', /b98a8a/.test(v.pw2FieldStyle));
+ok('the strength meter is shown on the reset screen too', v.hasPwStrength === true);
+v = mk({ phase: 'reset', busy: true });
+ok('while changing, the button is held and says so',
+  v.authBusy === true && v.resetLabel === 'Changing…', v.resetLabel);
+
+/* Pressing Enter must not fire a second request while one is in flight. */
+{
+  const c = new Component({});
+  Object.assign(c.state.auth, { phase: 'forgot', busy: true, form: { email: 'a@b.co' } });
+  let called = 0;
+  c.doForgot = () => { called++; };
+  c.authVals().onForgotKey({ key: 'Enter' });
+  ok('Enter is ignored while a request is in flight', called === 0, String(called));
+  c.state.auth.busy = false;
+  c.authVals().onForgotKey({ key: 'Enter' });
+  ok('and works when it is not', called === 1, String(called));
+}
+
+/* A reset link must be taken out of the address bar: it is a single-use
+   credential and has no business sitting in history or a screenshot. */
+{
+  const c = new Component({});
+  let replaced = null;
+  global.window.location = { search: '?reset=tok123&tab=Ledger', pathname: '/', hash: '' };
+  global.window.history = { replaceState: (a, b, url) => { replaced = url; } };
+  const token = c.takeResetToken();
+  ok('the token is read from the URL', token === 'tok123', String(token));
+  ok('and stripped from the address bar', replaced !== null && !/reset=/.test(replaced), String(replaced));
+  ok('while other query parameters are kept', /tab=Ledger/.test(String(replaced)), String(replaced));
+
+  global.window.location = { search: '', pathname: '/', hash: '' };
+  ok('no token in the URL reads as none', c.takeResetToken() === '');
+}
+
 console.log('\nThe form-level gate agrees with the field-level marks');
 const problemFor = (form) => {
   const c = new Component({});
@@ -389,6 +457,27 @@ ok('the app document schema version matches the app', MM_SCHEMA === 4);
 
 console.log('\nPassword hashing');
 (async () => {
+  /* A wrong code must not wipe the password just typed, and the code must not
+     survive the failure — opposite mistakes, both annoying. */
+  {
+    const c = new Component({});
+    Object.assign(c.state.auth, {
+      phase: 'reset', busy: false, resetToken: '',
+      form: { email: 'a@b.co', code: '123456', password: 'abcdefg1', password2: 'abcdefg1' }
+    });
+    c.api = () => Promise.reject(Object.assign(
+      new Error('That code is not right. 4 attempts left.'),
+      { status: 400, code: 'reset_bad_code' }));
+    await c.doReset();
+    const f = c.state.auth.form;
+    console.log('\nA rejected code keeps what it should');
+    ok('the typed password is left alone', f.password === 'abcdefg1', String(f.password));
+    ok('the wrong code is cleared', f.code === '', JSON.stringify(f.code));
+    ok('the error is shown', /not right/.test(c.state.auth.error), c.state.auth.error);
+    ok('it is not mistaken for a database outage', c.state.auth.dbDown === false);
+    ok('and the screen stays on the reset step', c.state.auth.phase === 'reset', c.state.auth.phase);
+  }
+
   const t0 = Date.now();
   const pw = await hashNewPassword('correct horse 7');
   const ms = Date.now() - t0;

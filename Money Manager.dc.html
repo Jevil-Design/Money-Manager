@@ -1997,7 +1997,8 @@ class Component extends DCLogic {
     if (!mmValidEmail(email)) { this.authError('Enter the email address for your account.'); return; }
 
     this.setAuth({ busy: true, error: '', notice: 'Sending the code…' });
-    this.api('/api/v1/auth/forgot', { method: 'POST', noAuth: true, json: { email: email } })
+    /* Returned so a caller — and the tests — can wait for it. */
+    return this.api('/api/v1/auth/forgot', { method: 'POST', noAuth: true, json: { email: email } })
       .then(function (r) {
         self.rememberEmail(email);
         /* The server answers the same way whether or not the address has an
@@ -2028,7 +2029,7 @@ class Component extends DCLogic {
     if (f.password !== f.password2) { this.authError('The two passwords don’t match.'); return; }
 
     this.setAuth({ busy: true, error: '', notice: 'Changing your password…' });
-    this.api('/api/v1/auth/reset', {
+    return this.api('/api/v1/auth/reset', {
       method: 'POST', noAuth: true,
       json: token
         ? { token: token, password: f.password, password2: f.password2 }
