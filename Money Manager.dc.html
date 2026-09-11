@@ -769,7 +769,7 @@
                 <div style="padding:8px 10px;color:var(--c-3c5163);display:flex;flex-direction:column;gap:7px">
                   <div>{{ accountNote }}</div>
                   <div style="display:flex;gap:8px"><span style="width:64px;flex:none;color:var(--c-5b7186)">Server</span><span style="font-weight:600;word-break:break-all">{{ acctServer }}</span></div>
-                  <div style="color:var(--c-7b8b9b);font-size:11px">There is no password reset: nothing but you knows your password. A backup file (Settings → Backup) is the way back in, so keep a recent one.</div>
+                  <div style="color:var(--c-7b8b9b);font-size:11px">{{ accountResetNote }}</div>
                   <div style="border-top:1px solid var(--c-eaf0f7);padding-top:7px">
                     <button onClick="{{ importFromBrowser }}" style="height:24px;padding:0 10px;border:1px solid var(--c-a8c0d8);background:linear-gradient(var(--c-surface),var(--c-e8f0f8));cursor:pointer;border-radius:2px">Import data left by the older version…</button>
                     <div style="color:var(--c-7b8b9b);font-size:11px;margin-top:4px">Only needed once, if you used this app before it moved to the cloud.</div>
@@ -1144,6 +1144,55 @@
             </div>
             <button onClick="{{ doLogin }}" disabled="{{ authBusy }}" style="{{ primaryBtnStyle }}">{{ loginLabel }}</button>
             <button onClick="{{ goSignup }}" disabled="{{ authBusy }}" style="width:100%;height:24px;margin-top:6px;border:1px solid var(--c-a8c0d8);background:linear-gradient(var(--c-surface),var(--c-e8f0f8));cursor:pointer;border-radius:2px">Create an account</button>
+            <sc-if value="{{ resetAvailable }}">
+              <button onClick="{{ goForgot }}" disabled="{{ authBusy }}" style="width:100%;height:22px;margin-top:6px;border:0;background:none;color:var(--c-2b7fd0);cursor:pointer;text-decoration:underline;font-size:11px;padding:0">Forgot your password?</button>
+            </sc-if>
+          </div>
+        </sc-if>
+
+        <sc-if value="{{ isForgot }}">
+          <div style="padding:0 14px 10px">
+            <label style="display:block;color:var(--c-3c5163);margin-bottom:3px">Email</label>
+            <input type="email" value="{{ forgotEmail }}" onChange="{{ onForgotEmail }}" onKeyDown="{{ onForgotKey }}" aria-label="Email" autoComplete="email" disabled="{{ authBusy }}" autoFocus="{{ true }}" style="width:100%;height:26px;border:1px solid var(--c-a8c0d8);padding:0 6px;border-radius:2px;background:var(--c-surface)" />
+            <div style="color:var(--c-7b8b9b);font-size:11px;margin-top:4px">We will send a six-digit code to this address. It is valid for {{ resetMinutes }} minutes.</div>
+            <button onClick="{{ doForgot }}" disabled="{{ authBusy }}" style="{{ primaryBtnStyle }}">{{ forgotLabel }}</button>
+            <button onClick="{{ goLogin }}" disabled="{{ authBusy }}" style="width:100%;height:24px;margin-top:6px;border:1px solid var(--c-a8c0d8);background:linear-gradient(var(--c-surface),var(--c-e8f0f8));cursor:pointer;border-radius:2px">Back to sign in</button>
+          </div>
+        </sc-if>
+
+        <sc-if value="{{ isReset }}">
+          <div style="padding:0 14px 10px">
+            <sc-if value="{{ resetNeedsEmail }}">
+              <label style="display:block;color:var(--c-3c5163);margin-bottom:3px">Email</label>
+              <input type="email" value="{{ forgotEmail }}" onChange="{{ onForgotEmail }}" onKeyDown="{{ onResetKey }}" aria-label="Email" autoComplete="email" disabled="{{ authBusy }}" style="width:100%;height:26px;border:1px solid var(--c-a8c0d8);padding:0 6px;border-radius:2px;background:var(--c-surface)" />
+              <label style="display:block;color:var(--c-3c5163);margin:8px 0 3px">Code from the email</label>
+              <input value="{{ resetCode }}" onChange="{{ onResetCode }}" onKeyDown="{{ onResetKey }}" aria-label="Reset code" inputMode="numeric" autoComplete="one-time-code" maxLength="{{ 7 }}" disabled="{{ authBusy }}" autoFocus="{{ true }}" style="width:100%;height:26px;border:1px solid var(--c-a8c0d8);padding:0 6px;border-radius:2px;background:var(--c-surface);letter-spacing:3px;font-variant-numeric:tabular-nums" />
+            </sc-if>
+            <sc-if value="{{ resetFromLink }}">
+              <div style="padding:6px 8px;border:1px solid var(--c-9db8d2);background:var(--c-eef5fb);color:var(--c-1c4470);font-size:11px">Reset link recognised. Choose a new password below.</div>
+            </sc-if>
+
+            <label style="display:block;color:var(--c-3c5163);margin:8px 0 3px">New password</label>
+            <div style="display:flex;gap:4px">
+              <input type="{{ pwFieldType }}" value="{{ signupPassword }}" onChange="{{ onSignupPassword }}" onKeyDown="{{ onResetKey }}" aria-label="New password" autoComplete="new-password" disabled="{{ authBusy }}" style="flex:1;min-width:0;height:26px;border:1px solid var(--c-a8c0d8);padding:0 6px;border-radius:2px;background:var(--c-surface)" />
+              <button onClick="{{ togglePw }}" title="{{ pwToggleTitle }}" aria-label="{{ pwToggleTitle }}" style="width:44px;height:26px;flex:none;border:1px solid var(--c-a8c0d8);background:linear-gradient(var(--c-surface),var(--c-e8f0f8));cursor:pointer;border-radius:2px;font-size:11px">{{ pwToggleLabel }}</button>
+            </div>
+            <label style="display:block;color:var(--c-3c5163);margin:8px 0 3px">Repeat</label>
+            <input type="{{ pwFieldType }}" value="{{ signupPassword2 }}" onChange="{{ onSignupPassword2 }}" onKeyDown="{{ onResetKey }}" aria-label="Repeat new password" autoComplete="new-password" disabled="{{ authBusy }}" style="{{ pw2FieldStyle }}width:100%" />
+
+            <sc-if value="{{ hasPwStrength }}">
+              <div style="display:flex;align-items:center;gap:6px;margin-top:6px">
+                <div style="flex:1;height:4px;border-radius:2px;background:var(--c-e8f0f8);overflow:hidden">
+                  <div style="{{ pwMeterStyle }}"></div>
+                </div>
+                <span style="{{ pwStrengthStyle }}">{{ pwStrengthLabel }}</span>
+              </div>
+            </sc-if>
+            <div style="color:var(--c-7b8b9b);font-size:11px;margin-top:2px">{{ passwordHint }}</div>
+            <div style="color:var(--c-7b8b9b);font-size:11px;margin-top:3px">Changing the password signs every device out of the account.</div>
+
+            <button onClick="{{ doReset }}" disabled="{{ authBusy }}" style="{{ primaryBtnStyle }}">{{ resetLabel }}</button>
+            <button onClick="{{ goLogin }}" disabled="{{ authBusy }}" style="width:100%;height:24px;margin-top:6px;border:1px solid var(--c-a8c0d8);background:linear-gradient(var(--c-surface),var(--c-e8f0f8));cursor:pointer;border-radius:2px">Back to sign in</button>
           </div>
         </sc-if>
 
@@ -1719,7 +1768,11 @@ class Component extends DCLogic {
         users: [], selected: '', userId: '', name: '', email: '', colour: '',
         encrypted: false, guest: false, legacyFound: false,
         busy: false, error: '', notice: '', dbDown: false, showPw: false, tries: 0, until: 0,
-        form: { name: '', email: '', password: '', password2: '', samples: false, encrypt: false }
+        /* Password reset. resetAvailable is answered by the server, because
+           only it knows whether email is configured — offering a link that
+           cannot send anything is worse than not offering it. */
+        resetAvailable: false, resetToken: '',
+        form: { name: '', email: '', password: '', password2: '', samples: false, encrypt: false, code: '' }
       }
     };
     this.sessionToken = '';       /* the only thing kept in local storage */
@@ -1919,6 +1972,88 @@ class Component extends DCLogic {
 
   rememberEmail(email) {
     try { localStorage.setItem('mm-last-email', email); } catch (e) { }
+  }
+
+  /* ---------- forgotten password ----------------------------------------
+     Two ways to prove control of the inbox, from one email: the link, which
+     carries a long random token, or the six-digit code typed in by hand.
+     The server treats either as proof and neither is stored in the clear.
+     --------------------------------------------------------------------- */
+  goForgot() {
+    var email = '';
+    try { email = localStorage.getItem('mm-last-email') || ''; } catch (e) { }
+    this.setAuth({
+      phase: 'forgot', error: '', notice: '', resetToken: '',
+      form: Object.assign({}, this.state.auth.form, {
+        email: this.state.auth.form.email || email, password: '', password2: '', code: ''
+      })
+    });
+  }
+
+  doForgot() {
+    var self = this, f = this.state.auth.form;
+    if (this.state.auth.busy) return;
+    var email = String(f.email || '').trim();
+    if (!mmValidEmail(email)) { this.authError('Enter the email address for your account.'); return; }
+
+    this.setAuth({ busy: true, error: '', notice: 'Sending the code…' });
+    this.api('/api/v1/auth/forgot', { method: 'POST', noAuth: true, json: { email: email } })
+      .then(function (r) {
+        self.rememberEmail(email);
+        /* The server answers the same way whether or not the address has an
+           account, so this wording must not promise that it did. */
+        self.setAuth({
+          phase: 'reset', busy: false, error: '', resetToken: '',
+          notice: (r && r.message) ||
+            'If that address has an account, a reset code is on its way to it.',
+          form: Object.assign({}, self.state.auth.form, { password: '', password2: '', code: '' })
+        });
+      })
+      .catch(function (e) { self.authError(e.message, e.code); });
+  }
+
+  doReset() {
+    var self = this, a = this.state.auth, f = a.form;
+    if (a.busy) return;
+    var token = a.resetToken || '';
+    var email = String(f.email || '').trim();
+    var code = String(f.code || '').replace(/\s+/g, '');
+
+    if (!token) {
+      if (!mmValidEmail(email)) { this.authError('Enter the email address for your account.'); return; }
+      if (!code) { this.authError('Enter the code from the email.'); return; }
+    }
+    var problem = mmPasswordProblem(f.password);
+    if (problem) { this.authError(problem); return; }
+    if (f.password !== f.password2) { this.authError('The two passwords don’t match.'); return; }
+
+    this.setAuth({ busy: true, error: '', notice: 'Changing your password…' });
+    this.api('/api/v1/auth/reset', {
+      method: 'POST', noAuth: true,
+      json: token
+        ? { token: token, password: f.password, password2: f.password2 }
+        : { email: email, code: code, password: f.password, password2: f.password2 }
+    }).then(function (r) {
+      /* Deliberately not signed in here.  The reset ended every session,
+         including any this browser held, and signing in with the new password
+         is the confirmation that it is the one they meant to set. */
+      self.setToken('');
+      self.docRev = 0;
+      self.setAuth({
+        phase: 'login', busy: false, error: '', resetToken: '',
+        notice: (r && r.message) || 'Your password has been changed. Sign in with it.',
+        form: { name: '', email: email, password: '', password2: '', samples: false, code: '' }
+      });
+    }).catch(function (e) {
+      /* A wrong code must leave the typed password alone — retyping it after
+         a mistyped digit is pure annoyance. */
+      self.setAuth({
+        busy: false, notice: '',
+        dbDown: mmIsDbDown(e),
+        error: mmIsDbDown(e) ? '' : e.message,
+        form: Object.assign({}, self.state.auth.form, { code: '' })
+      });
+    });
   }
 
   /* Toggle the password fields between hidden and visible.  It is a view
@@ -2495,8 +2630,63 @@ class Component extends DCLogic {
   }
 
   /* ---------- boot ---------- */
+
+  /* A reset link opens the app with ?reset=<token>.  Take it out of the URL
+     immediately: it is a single-use credential and there is no reason for it
+     to sit in the address bar, the history, or a screenshot. */
+  takeResetToken() {
+    var token = '';
+    try {
+      var params = new URLSearchParams(window.location.search || '');
+      token = params.get('reset') || '';
+      if (token) {
+        params.delete('reset');
+        var rest = params.toString();
+        window.history.replaceState({}, '',
+          window.location.pathname + (rest ? '?' + rest : '') + (window.location.hash || ''));
+      }
+    } catch (e) { /* an exotic browser just means the code has to be typed */ }
+    return token;
+  }
+
+  /* Ask the server what it can do before drawing the sign-in panel: whether
+     password reset is available, and whether the database is even reachable.
+     One unauthenticated request, and it means the panel never offers
+     something that would fail. */
+  probeServer() {
+    var self = this;
+    return this.api('/api/v1/health', { noAuth: true }).then(function (h) {
+      self.setAuth({ resetAvailable: !!(h && h.passwordReset), dbDown: false });
+      return h;
+    }).catch(function (e) {
+      /* A database outage is worth showing here rather than waiting for the
+         first sign-in attempt to fail.  Only overwrite dbDown while signed
+         out: once the app is open, saveNow() is the honest signal and this
+         probe must not contradict it. */
+      var patch = { resetAvailable: false };
+      if (self.state.auth.phase !== 'ready') patch.dbDown = mmIsDbDown(e);
+      self.setAuth(patch);
+      return null;
+    });
+  }
+
   bootAuth() {
     var self = this;
+    /* Ask what the server can do on every load, not only when signed out:
+       Settings → Account describes the way back into a locked-out account,
+       and that description is wrong unless we know whether email works. */
+    this.probeServer();
+    var resetToken = this.takeResetToken();
+    if (resetToken) {
+      /* A reset link wins over an existing session: someone following one is
+         trying to regain access, and the reset will end every session anyway. */
+      this.setAuth({
+        phase: 'reset', busy: false, error: '', resetToken: resetToken,
+        notice: 'Choose a new password for your account.',
+        form: Object.assign({}, this.state.auth.form, { password: '', password2: '', code: '' })
+      });
+      return Promise.resolve();
+    }
     var token = this.loadToken();
     if (!token) {
       this.setAuth({ phase: 'login', busy: false, error: '' });
@@ -6544,6 +6734,11 @@ class Component extends DCLogic {
       signOutEverywhere: function () { self.signOutEverywhere(); },
       accountNote: 'Your books are held in the cloud database, not in this browser. Sign in with the same email and password on any computer or phone and the same data opens.',
       accountSecurityNote: 'Nothing financial is stored in this browser — only your session token, so a shared or stolen computer does not carry your books with it. The trade-off is that the app needs a connection to work at all.',
+      /* What the "way back in" actually is depends on whether this
+         deployment can send email, so ask rather than assert. */
+      accountResetNote: (this.state.auth && this.state.auth.resetAvailable)
+        ? 'Forgotten your password? Sign out and use "Forgot your password?" on the sign-in screen — a code is emailed to the address on the account. Resetting it signs every device out. Your data is not encrypted with your password, so nothing is lost.'
+        : 'Password reset by email is not configured on this deployment, so nothing but you knows your password. A backup file (Settings → Backup) is the way back in — keep a recent one.',
 
       genFields: genFields,
 
@@ -8605,10 +8800,31 @@ class Component extends DCLogic {
 
     return {
       signedIn: phase === 'ready',
-      needsAuth: phase === 'login' || phase === 'signup',
+      needsAuth: phase === 'login' || phase === 'signup' || phase === 'forgot' || phase === 'reset',
       authBooting: phase === 'boot',
       isSignup: phase === 'signup',
       isLogin: phase === 'login',
+      isForgot: phase === 'forgot',
+      isReset: phase === 'reset',
+
+      /* ----- forgotten password ----- */
+      resetAvailable: !!a.resetAvailable,
+      resetMinutes: 15,
+      goForgot: function () { self.goForgot(); },
+      doForgot: function () { self.doForgot(); },
+      forgotLabel: a.busy ? 'Sending…' : 'Email me a code',
+      forgotEmail: f.email || '',
+      onForgotEmail: set('email'),
+      onForgotKey: function (e) { if (e.key === 'Enter' && !a.busy) self.doForgot(); },
+      /* A link carries its own proof, so the address and code are only asked
+         for when someone is typing the code in by hand. */
+      resetFromLink: !!a.resetToken,
+      resetNeedsEmail: !a.resetToken,
+      resetCode: f.code || '',
+      onResetCode: set('code'),
+      onResetKey: function (e) { if (e.key === 'Enter' && !a.busy) self.doReset(); },
+      doReset: function () { self.doReset(); },
+      resetLabel: a.busy ? 'Changing…' : 'Set new password',
       authBusy: !!a.busy,
       authError: a.error || '',
       hasAuthError: !!a.error,
@@ -8622,10 +8838,17 @@ class Component extends DCLogic {
       retryBtnStyle: 'height:23px;padding:0 12px;border:1px solid var(--c-1c4470);border-radius:2px;font-weight:600;color:var(--c-onaccent);background:linear-gradient(var(--c-5b8cbf),var(--c-2b5f96));cursor:' +
         (a.busy ? 'default' : 'pointer') + ';opacity:' + (a.busy ? '.65' : '1'),
       openAdminHelp: function () { self.openAdminHelp(); },
-      authTitle: phase === 'signup' ? 'Create your account' : 'Sign in',
+      authTitle: phase === 'signup' ? 'Create your account'
+        : phase === 'forgot' ? 'Reset your password'
+          : phase === 'reset' ? 'Choose a new password'
+            : 'Sign in',
       authSubtitle: phase === 'signup'
         ? 'Your books are kept on the server, so this account opens with the same data on any computer or phone.'
-        : 'Sign in to load your books from the server.',
+        : phase === 'forgot'
+          ? 'Tell us the address on the account and we will email a code to it.'
+          : phase === 'reset'
+            ? 'Your data is not encrypted with your password, so nothing is lost by changing it.'
+            : 'Sign in to load your books from the server.',
 
       /* ----- sign in ----- */
       authEmail: f.email || '',
@@ -8693,7 +8916,9 @@ class Component extends DCLogic {
       samplesNote: 'Adds a few example accounts and transactions so you can look around. Remove them later from Settings → Data.',
       passwordHint: 'At least 8 characters, with a letter and a number.',
       authFootnote: 'Your data is stored on the server this app is served from — nothing financial is kept in this browser. ' +
-        'There is no password reset, so keep a backup file (Settings → Backup) as your way back in.',
+        (a.resetAvailable
+          ? 'Forgotten your password? Use the link on the sign-in screen to have a code emailed to you.'
+          : 'There is no password reset on this deployment, so keep a backup file (Settings → Backup) as your way back in.'),
       authServer: this.apiBase() || '(unknown)',
 
       /* ----- the signed-in identity and save state in the title bar ----- */

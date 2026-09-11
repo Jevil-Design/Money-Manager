@@ -23,8 +23,10 @@ The trade-offs that come with that, stated plainly:
   the save indicator reads "Not saved", and it keeps retrying.
 - **The database is the only copy.** If the deployment or the database goes
   away, so do the books. Download a backup now and then (Settings → Backup).
-- **There is no password reset.** Nothing but you knows your password. A backup
-  file is the way back in.
+- **Password reset needs email configured.** With `RESEND_API_KEY` and
+  `MAIL_FROM` set, "Forgot your password?" emails a code and a link. Without
+  them there is no reset at all and a backup file is the only way back in — so
+  either configure it or keep a backup.
 
 `server/` is the original self-hosted version, excluded from the deployment by
 `.vercelignore`. It cannot run on Vercel (it writes to disk at start-up, uses
@@ -97,7 +99,58 @@ It is genuinely optional and safe to add later. **Passwords do not depend on
 it** — the only consequence of adding, changing or losing it is that existing
 sessions stop matching and people sign in again.
 
-## 4. Optional: Google sign-in
+## 4. Optional: password reset by email
+
+Without this, a forgotten password means a lost account — there is no way back
+in but a backup file. With it, the sign-in screen offers **Forgot your
+password?**, which emails a six-digit code and a link.
+
+Create an API key at **resend.com** (free tier is ample for this), then set:
+
+```
+RESEND_API_KEY = re_...
+MAIL_FROM      = Money Manager <mm@yourdomain.com>
+```
+
+`MAIL_FROM` must be an address at a domain you have verified with Resend. For
+a quick trial, Resend also accepts `onboarding@resend.dev` as the sender, but
+it will only deliver to the email address that owns the Resend account — fine
+for testing, not for a second user.
+
+Reset links point at `APP_URL`, falling back to Vercel's own
+`VERCEL_PROJECT_PRODUCTION_URL`, so on Vercel this needs nothing. Set `APP_URL`
+if you serve the app from a custom domain.
+
+**The link origin is never taken from the request's `Host` header.** If it
+were, anyone could POST to `/auth/forgot` with a spoofed `Host` and the account
+holder would receive a genuine email carrying a valid reset token pointing at
+the attacker's site. With neither variable set, the email carries the code and
+simply omits the link.
+
+How the reset works, and why it is safe:
+
+- A request answers identically whether or not the address has an account, so
+  the endpoint cannot be used to find out who banks here.
+- The email carries a six-digit code **and** a link with a 256-bit token.
+  Either proves control of the inbox; the link is convenient on the same
+  device, the code works when the email is read somewhere else.
+- Neither is stored. The link token is kept as its SHA-256 digest; the code is
+  kept as a **scrypt** hash, because six digits is only a million
+  possibilities and a plain digest would be brute-forceable from a database
+  dump. scrypt makes that cost about a day per code — for a code that expires
+  in 15 minutes.
+- Five wrong guesses burn the record, so a new email is needed.
+- Three requests per account per 15 minutes, so it cannot flood an inbox.
+- Completing a reset **signs every device out**, which is the point if the
+  reason for the reset is that someone else had the password.
+- **Your data is not encrypted with your password** — the password only
+  authenticates you. Resetting it cannot lose a single transaction.
+
+`/api/health` reports `passwordReset` and `passwordResetLink`, and the app
+hides the "Forgot your password?" link entirely unless the server says it
+works.
+
+## 5. Optional: Google sign-in
 
 Not required — email and password is the normal route. If you want the Google
 button (and Drive backup), follow `server/GOOGLE-SETUP.md`, add your Vercel URL
@@ -107,7 +160,7 @@ to the OAuth client's **Authorised JavaScript origins**, and set:
 GOOGLE_CLIENT_ID = 1234....apps.googleusercontent.com
 ```
 
-## 5. Use it
+## 6. Use it
 
 Open your Vercel URL → **Create an account** → name, email, password. That is
 the whole setup. On another device, open the same URL and **Sign in**.
@@ -122,6 +175,9 @@ work; never commit a file with real values (`.gitignore` excludes them).
 | `DATABASE_URL` | **yes** | Postgres connection string (aliases above) |
 | `ALLOWED_EMAILS` | no | who may create an account; unset = first registration claims it |
 | `AUTH_SECRET` | no | keys the HMAC over session tokens |
+| `RESEND_API_KEY` | no | enables "Forgot your password?" |
+| `MAIL_FROM` | no | the sender address reset email comes from |
+| `APP_URL` | no | origin for reset links; Vercel supplies it automatically |
 | `GOOGLE_CLIENT_ID` | no | enables the Google sign-in button |
 | `KEEP_SNAPSHOTS` | no | snapshots kept per account (default 40) |
 | `CORS_ORIGIN` | no | restrict which origins may call the API (default `*`) |

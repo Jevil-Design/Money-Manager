@@ -34,6 +34,8 @@
  *   GET    /health              liveness, encoding, schema version, config
  *   POST   /auth/register       {name,email,password} -> {token,user}
  *   POST   /auth/login          {email,password} -> {token,user}
+ *   POST   /auth/forgot         {email} — emails a code and a link
+ *   POST   /auth/reset          {token|email+code, password} — sets a new one
  *   GET    /auth/session        the signed-in user and the current revision
  *   POST   /auth/logout         end this session
  *   POST   /auth/logout-all     end every session for the account
@@ -533,13 +535,38 @@ CREATE TABLE IF NOT EXISTS mm_meta (
   value       TEXT NOT NULL,
   updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+/* --- password reset ---------------------------------------------------------
+   One row per reset request. Neither the link token nor the emailed code is
+   stored: only their digests, so a database dump cannot be turned into a
+   password reset.
+
+   The code is only six digits — a million possibilities — so it is hashed
+   with scrypt rather than SHA-256. Brute-forcing a stolen digest then costs
+   about a day of compute for one code that expires in fifteen minutes, which
+   makes it pointless. attempts caps online guessing at five.
+
+   ON DELETE CASCADE, like every other table, so deleting an account takes its
+   pending resets with it. */
+CREATE TABLE IF NOT EXISTS mm_reset (
+  id          TEXT PRIMARY KEY,
+  user_id     TEXT NOT NULL REFERENCES mm_user(id) ON DELETE CASCADE,
+  code_hash   TEXT NOT NULL,
+  code_salt   TEXT NOT NULL,
+  attempts    INTEGER NOT NULL DEFAULT 0,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  expires_at  TIMESTAMPTZ NOT NULL,
+  used_at     TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS mm_reset_user_idx ON mm_reset (user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS mm_reset_expiry_idx ON mm_reset (expires_at);
 `;
 
 /* Bump when SCHEMA changes, so /health reports what a given database has had
    applied.  It is a record, not a gate: every statement in SCHEMA is
    CREATE/ALTER ... IF NOT EXISTS, so re-running the whole thing is safe,
    concurrent-safe, and never touches a row of data. */
-const SCHEMA_VERSION = '3';
+const SCHEMA_VERSION = '4';
 
 /* The tables are created on first use rather than by a separate migration
    step, so deploying needs nothing but a connection string.  Every statement
@@ -926,6 +953,123 @@ async function noteFailure(client, user) {
 }
 async function clearFailures(client, userId) {
   await query(client, 'UPDATE mm_user SET fail_count = 0, locked_until = NULL WHERE id = $1', [userId]).catch(() => {});
+}
+
+/* ------------------------------------------------------------ sending email
+
+   Used only for password resets. An HTTP API rather than SMTP, because that
+   needs no npm dependency — and a dependency that fails to build on the
+   serverless runtime takes the whole deployment down, which is not a trade
+   worth making for one transactional email.
+
+   Resend is the provider implemented here (one POST, an API key, no SDK).
+   Adding another HTTP provider means one more branch in sendMail().
+
+   Unconfigured is a supported state: the reset endpoints report that plainly
+   and the app hides the "forgot password" link, rather than accepting a
+   request it cannot fulfil and leaving someone waiting for an email that is
+   never coming.
+*/
+const MAIL_FROM = String(process.env.MAIL_FROM || '').trim();
+const RESEND_API_KEY = String(process.env.RESEND_API_KEY || '').trim();
+
+function mailConfigured() {
+  return !!(RESEND_API_KEY && MAIL_FROM);
+}
+
+/* Where a reset link should point.
+ *
+ * Deliberately NOT derived from the Host header. The header is set by the
+ * caller, so anyone could POST /auth/forgot with Host: evil.example, and the
+ * victim would receive a genuine email containing a valid reset token
+ * pointing at the attacker's site. That is a real, known attack (host header
+ * injection), and the cost of avoiding it is one environment variable.
+ *
+ * Vercel sets VERCEL_PROJECT_PRODUCTION_URL, so this is usually automatic.
+ * With neither that nor APP_URL, the email carries the code only and no link
+ * — degraded, but not exploitable. */
+function appOrigin() {
+  const explicit = String(process.env.APP_URL || '').trim().replace(/\/+$/, '');
+  if (explicit) return /^https?:\/\//.test(explicit) ? explicit : 'https://' + explicit;
+  const vercel = String(process.env.VERCEL_PROJECT_PRODUCTION_URL || '').trim();
+  if (vercel) return 'https://' + vercel.replace(/^https?:\/\//, '').replace(/\/+$/, '');
+  return '';
+}
+
+async function sendMail(to, subject, text) {
+  if (!mailConfigured()) {
+    throw appError(503, 'reset_unavailable',
+      'Password reset is not available on this deployment. Ask the administrator to set it up.',
+      'RESEND_API_KEY and MAIL_FROM must both be set for password reset email to be sent.');
+  }
+  let res;
+  try {
+    res = await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer ' + RESEND_API_KEY,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ from: MAIL_FROM, to: [to], subject: subject, text: text })
+    });
+  } catch (err) {
+    console.error('money-manager mail: could not reach the mail provider — ' + scrub(err && err.message));
+    throw appError(502, 'mail_failed',
+      'The reset email could not be sent just now. Please try again in a moment.',
+      scrub(err && err.message));
+  }
+  if (!res.ok) {
+    /* The provider's body explains misconfiguration — an unverified sending
+       domain, a revoked key — and belongs in the log, never in the reply. */
+    let detail = '';
+    try { detail = (await res.text()).slice(0, 500); } catch (e) { /* nothing to add */ }
+    console.error('money-manager mail: provider returned ' + res.status + ' — ' + scrub(detail));
+    throw appError(502, 'mail_failed',
+      'The reset email could not be sent just now. Please try again in a moment.',
+      'provider HTTP ' + res.status);
+  }
+}
+
+/* ---------------------------------------------------------- password resets */
+
+const RESET_MINUTES = 15;
+const RESET_MAX_ATTEMPTS = 5;
+/* How many requests one account may make in the window, so the endpoint
+   cannot be used to flood someone's inbox. */
+const RESET_MAX_PER_WINDOW = 3;
+
+/* Six digits, uniformly distributed. Math.random() would be predictable and
+   a plain modulo of one byte would bias the low digits, so take a value from
+   the full range and reject the tail that would skew it. */
+function resetCode() {
+  const LIMIT = 1000000;
+  const CEILING = Math.floor(0xffffffff / LIMIT) * LIMIT;
+  let n;
+  do { n = crypto.randomBytes(4).readUInt32BE(0); } while (n >= CEILING);
+  return String(n % LIMIT).padStart(6, '0');
+}
+
+function resetEmailBody(name, code, link) {
+  const lines = [
+    'Hello ' + (name || 'there') + ',',
+    '',
+    'Someone asked to reset the password for your Money Manager account.',
+    '',
+    'Your reset code is: ' + code,
+    ''
+  ];
+  if (link) {
+    lines.push('Or open this link, which fills the code in for you:', link, '');
+  }
+  lines.push(
+    'The code expires in ' + RESET_MINUTES + ' minutes and can only be used once.',
+    '',
+    'If you did not ask for this, you can ignore this email — nothing has',
+    'changed, and your current password still works.',
+    '',
+    'Resetting the password signs every device out of the account.'
+  );
+  return lines.join('\n');
 }
 
 /* ------------------------------------------- a new account's first document
@@ -1494,6 +1638,10 @@ async function handleRequest(req, res) {
         ? 'This database is ' + encoding + ', not UTF8, so it cannot store the ₹ sign. Recreate it with UTF8 encoding.'
         : null,
       authSecretSet: !!(process.env.AUTH_SECRET || '').trim(),
+      /* The app hides the "forgot password" link unless this is true, rather
+         than offering something the deployment cannot do. */
+      passwordReset: mailConfigured(),
+      passwordResetLink: mailConfigured() ? !!appOrigin() : null,
       googleSignIn: !!process.env.GOOGLE_CLIENT_ID,
       accessPolicy: (process.env.ALLOWED_EMAILS || '').trim()
         ? 'allowlist'
@@ -1642,6 +1790,182 @@ async function handleRequest(req, res) {
         const token = await issueSession(client, user.id, req.headers['x-device']);
         setSessionCookie(res, req, token);
         return send(res, 200, { token: token, user: publicUser(user) });
+      }
+
+      /* ---- forgot password: send a code and a link ------------------------
+         Answers the same way whether or not the address has an account. If it
+         said "no such account" it would be a free tool for working out who
+         banks here, so the only thing a caller learns is that the request was
+         accepted. */
+      if (route === 'auth/forgot' && method === 'POST') {
+        let body;
+        try { body = (await readJsonBody(req)) || {}; }
+        catch (e) { return send(res, 400, { error: 'The request could not be read.', code: 'bad_body' }); }
+        const email = normEmail(body.email);
+        if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+          return send(res, 422, { error: 'Enter the email address for your account.', code: 'email_invalid' });
+        }
+        /* This one IS worth saying plainly: it is the deployment's own
+           configuration, not a fact about any account. */
+        if (!mailConfigured()) {
+          return send(res, 503, {
+            error: 'Password reset by email is not set up on this deployment. ' +
+              'Ask the administrator to configure it.',
+            code: 'reset_unavailable'
+          });
+        }
+
+        const accepted = {
+          ok: true,
+          sent: true,
+          expiresInMinutes: RESET_MINUTES,
+          message: 'If that address has an account, a reset code is on its way to it.'
+        };
+
+        const found = await query(client,
+          'SELECT id, email, name FROM mm_user WHERE lower(email) = $1', [email]);
+        if (!found.rows.length) {
+          /* Spend roughly the time a real request costs, so the response time
+             does not answer the question the status code refuses to. */
+          await burnPasswordTime(crypto.randomBytes(8).toString('hex'));
+          return send(res, 200, accepted);
+        }
+        const account = found.rows[0];
+
+        /* Don't let this become an inbox flood. Expired and used rows do not
+           count, so a genuine retry after a mistake still works. */
+        const recent = await query(client,
+          `SELECT COUNT(*)::int AS n FROM mm_reset
+            WHERE user_id = $1 AND created_at > now() - ($2 || ' minutes')::interval`,
+          [account.id, String(RESET_MINUTES)]);
+        if (Number(recent.rows[0].n) >= RESET_MAX_PER_WINDOW) {
+          /* Still a 200: a caller must not be able to tell "too many
+             requests" (which proves the account exists) from "sent". */
+          console.error('money-manager reset: throttled, ' + RESET_MAX_PER_WINDOW +
+            ' requests already in the last ' + RESET_MINUTES + ' minutes for one account');
+          return send(res, 200, accepted);
+        }
+
+        const token = crypto.randomBytes(32).toString('base64url');
+        const code = resetCode();
+        const salt = newSalt();
+        const codeHash = await scryptHash(code, salt);
+
+        await query(client,
+          `INSERT INTO mm_reset (id, user_id, code_hash, code_salt, expires_at)
+           VALUES ($1,$2,$3,$4, now() + ($5 || ' minutes')::interval)`,
+          [sha(token), account.id, codeHash, salt, String(RESET_MINUTES)]);
+        /* Housekeeping: this account's spent and expired rows. */
+        await query(client,
+          'DELETE FROM mm_reset WHERE user_id = $1 AND (expires_at < now() OR used_at IS NOT NULL)',
+          [account.id]).catch(() => {});
+
+        const origin = appOrigin();
+        const link = origin ? origin + '/?reset=' + encodeURIComponent(token) : '';
+        if (!origin) {
+          console.error('money-manager reset: neither APP_URL nor VERCEL_PROJECT_PRODUCTION_URL ' +
+            'is set, so the email carries the code but no link.');
+        }
+        await sendMail(account.email, 'Reset your Money Manager password',
+          resetEmailBody(account.name, code, link));
+
+        return send(res, 200, accepted);
+      }
+
+      /* ---- complete the reset --------------------------------------------
+         Either half of the email proves control of the inbox: the link's
+         token, or the six-digit code with the address. */
+      if (route === 'auth/reset' && method === 'POST') {
+        let body;
+        try { body = (await readJsonBody(req)) || {}; }
+        catch (e) { return send(res, 400, { error: 'The request could not be read.', code: 'bad_body' }); }
+
+        const bad = passwordProblem(body.password);
+        if (bad) return send(res, 422, { error: bad, code: 'password_weak' });
+        if (body.password2 != null && String(body.password2) !== String(body.password)) {
+          return send(res, 422, { error: 'The two passwords don’t match.', code: 'password_mismatch' });
+        }
+
+        const token = String(body.token || '').trim();
+        const code = String(body.code || '').replace(/\s+/g, '');
+        const email = normEmail(body.email);
+        const expired = {
+          error: 'That reset code has expired or has already been used. Ask for a new one.',
+          code: 'reset_invalid'
+        };
+
+        let row = null;
+        if (token) {
+          /* The link. A 256-bit token is proof on its own. */
+          const r = await query(client,
+            `SELECT * FROM mm_reset
+              WHERE id = $1 AND used_at IS NULL AND expires_at > now()`, [sha(token)]);
+          row = r.rows[0] || null;
+          if (!row) return send(res, 400, expired);
+        } else {
+          if (!email || !code) {
+            return send(res, 422, {
+              error: 'Enter your email address and the code from the email.',
+              code: 'reset_incomplete'
+            });
+          }
+          const r = await query(client,
+            `SELECT r.* FROM mm_reset r JOIN mm_user u ON u.id = r.user_id
+              WHERE lower(u.email) = $1 AND r.used_at IS NULL AND r.expires_at > now()
+              ORDER BY r.created_at DESC LIMIT 1`, [email]);
+          row = r.rows[0] || null;
+          if (!row) {
+            await burnPasswordTime(code);
+            return send(res, 400, expired);
+          }
+          if (row.attempts >= RESET_MAX_ATTEMPTS) {
+            await query(client, 'UPDATE mm_reset SET used_at = now() WHERE id = $1', [row.id]);
+            return send(res, 400, expired);
+          }
+          const given = await scryptHash(code, row.code_salt);
+          if (!timingSafeEqual(given, row.code_hash)) {
+            const n = Number(row.attempts) + 1;
+            /* Burn the record on the last allowed attempt, so five wrong
+               guesses cost a new email rather than allowing a sixth. */
+            await query(client,
+              'UPDATE mm_reset SET attempts = $1, used_at = CASE WHEN $1 >= $2 THEN now() ELSE NULL END WHERE id = $3',
+              [n, RESET_MAX_ATTEMPTS, row.id]);
+            const left = Math.max(0, RESET_MAX_ATTEMPTS - n);
+            return send(res, 400, {
+              error: left
+                ? 'That code is not right. ' + left + ' attempt' + (left === 1 ? '' : 's') + ' left.'
+                : 'That code is not right, and there are no attempts left. Ask for a new code.',
+              code: 'reset_bad_code'
+            });
+          }
+        }
+
+        /* Proven. Change the password and end every session, in one
+           transaction — a half-applied reset would leave the account either
+           unreachable or still open on a device someone else is holding. */
+        await query(client, 'BEGIN', []);
+        try {
+          await writePassword(client, row.user_id, body.password);
+          await query(client, 'UPDATE mm_reset SET used_at = now() WHERE id = $1', [row.id]);
+          /* Any other outstanding request for this account is void too. */
+          await query(client,
+            'UPDATE mm_reset SET used_at = now() WHERE user_id = $1 AND used_at IS NULL',
+            [row.user_id]);
+          /* Signing every device out is the point: if the password was reset
+             because someone else had it, their session must not survive. */
+          await query(client, 'DELETE FROM mm_token WHERE user_id = $1', [row.user_id]);
+          await query(client, 'UPDATE mm_user SET fail_count = 0, locked_until = NULL WHERE id = $1',
+            [row.user_id]);
+          await query(client, 'COMMIT', []);
+        } catch (err) {
+          await query(client, 'ROLLBACK', []).catch(() => {});
+          throw err;
+        }
+        clearSessionCookie(res, req);
+        return send(res, 200, {
+          ok: true,
+          message: 'Your password has been changed. Every device has been signed out — sign in again with the new password.'
+        });
       }
 
       const user = await authenticate(client, req);
