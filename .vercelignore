@@ -17,3 +17,16 @@ uploads/
 .env
 .env.*
 .env.example
+
+# Neon's own tooling: neon.ts declares services on Neon's platform and
+# hello.ts is a function deployed THERE, not here. Money Manager's backend is
+# api/index.js on Vercel; Neon only provides the Postgres database. Excluding
+# these keeps the bundle minimal and leaves no root-level .ts for Vercel's
+# build step to form an opinion about.
+neon.ts
+hello.ts
+.neon/
+skills-lock.json
+
+# Skill documentation for coding agents — not part of the running app.
+.claude/

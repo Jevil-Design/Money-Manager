@@ -185,6 +185,14 @@ const URL_B = 'postgres://u:pw@db-b.example.org:5432/mm?sslmode=require';
     ok('there is a connection timeout', o.connectionTimeoutMillis > 0, String(o.connectionTimeoutMillis));
     ok('TLS certificates are verified by default',
       o.ssl && o.ssl.rejectUnauthorized === true, JSON.stringify(o.ssl));
+    /* node-postgres throws away an explicit ssl option when the connection
+       string carries sslmode, so the parameter must not reach the driver —
+       otherwise our setting is ignored and a future pg release silently
+       stops verifying certificates. */
+    ok('sslmode is stripped from the URL, so our ssl setting is the one that applies',
+      !/sslmode/i.test(o.connectionString), o.connectionString);
+    ok('the rest of the connection string is untouched',
+      o.connectionString === URL_A.replace('?sslmode=require', ''), o.connectionString);
     ok('the connection is labelled for the provider dashboard',
       o.application_name === 'money-manager', String(o.application_name));
 
@@ -271,7 +279,8 @@ const URL_B = 'postgres://u:pw@db-b.example.org:5432/mm?sslmode=require';
     ok('a second pool is built for the new database', fake.log.pools === 2, String(fake.log.pools));
     ok('the stale pool was shut down', fake.log.ends === 1, String(fake.log.ends));
     ok('the new pool points at the new host',
-      fake.log.poolOptions[1].connectionString === URL_B);
+      fake.log.poolOptions[1].connectionString.indexOf('db-b.example.org') >= 0,
+      fake.log.poolOptions[1].connectionString);
 
     /* Unchanged again — no churn. */
     await call(port, 'GET', '/api/health');
@@ -357,10 +366,69 @@ const URL_B = 'postgres://u:pw@db-b.example.org:5432/mm?sslmode=require';
     const server = await startServer(handler);
     const port = server.address().port;
     await call(port, 'GET', '/api/health');
+    /* This is the case that was silently broken: with sslmode in the URL the
+       driver discarded the option, so the escape hatch did nothing. */
     ok('certificate verification can be turned off deliberately',
-      fake.log.poolOptions[0].ssl.rejectUnauthorized === false);
+      fake.log.poolOptions[0].ssl.rejectUnauthorized === false,
+      JSON.stringify(fake.log.poolOptions[0].ssl));
     server.close();
     delete process.env.PGSSL_NO_VERIFY;
+  }
+
+  console.log('\nThe provider\'s own sslmode is still honoured');
+  {
+    /* sslmode=disable means the operator asked for plain TCP. */
+    const fake = makeFakePg();
+    const handler = loadApi(fake.module,
+      { DATABASE_URL: 'postgres://u:pw@db.example.org:5432/mm?sslmode=disable', VERCEL_ENV: 'development' });
+    const server = await startServer(handler);
+    const port = server.address().port;
+    await call(port, 'GET', '/api/health');
+    ok('sslmode=disable turns TLS off', fake.log.poolOptions[0].ssl === false,
+      JSON.stringify(fake.log.poolOptions[0].ssl));
+    server.close();
+  }
+  {
+    /* sslmode=no-verify means encrypt without checking the certificate. */
+    const fake = makeFakePg();
+    const handler = loadApi(fake.module,
+      { DATABASE_URL: 'postgres://u:pw@db.example.org:5432/mm?sslmode=no-verify', VERCEL_ENV: 'production' });
+    const server = await startServer(handler);
+    const port = server.address().port;
+    await call(port, 'GET', '/api/health');
+    ok('sslmode=no-verify encrypts without verifying',
+      fake.log.poolOptions[0].ssl.rejectUnauthorized === false,
+      JSON.stringify(fake.log.poolOptions[0].ssl));
+    server.close();
+  }
+  {
+    /* A remote host with no sslmode at all must still be verified. */
+    const fake = makeFakePg();
+    const handler = loadApi(fake.module,
+      { DATABASE_URL: 'postgres://u:pw@db.example.org:5432/mm', VERCEL_ENV: 'production' });
+    const server = await startServer(handler);
+    const port = server.address().port;
+    await call(port, 'GET', '/api/health');
+    ok('a remote host with no sslmode is still encrypted and verified',
+      fake.log.poolOptions[0].ssl.rejectUnauthorized === true,
+      JSON.stringify(fake.log.poolOptions[0].ssl));
+    server.close();
+  }
+  {
+    /* Other query parameters must survive the strip — Neon sends
+       channel_binding alongside sslmode. */
+    const fake = makeFakePg();
+    const handler = loadApi(fake.module, {
+      DATABASE_URL: 'postgres://u:pw@db.example.org/mm?channel_binding=require&sslmode=require&application_name=x',
+      VERCEL_ENV: 'production'
+    });
+    const server = await startServer(handler);
+    const port = server.address().port;
+    await call(port, 'GET', '/api/health');
+    const cs = fake.log.poolOptions[0].connectionString;
+    ok('only sslmode is removed; other parameters are kept',
+      !/sslmode/.test(cs) && /channel_binding=require/.test(cs) && /application_name=x/.test(cs), cs);
+    server.close();
   }
 
   console.log('\n' + (fails ? fails + ' FAILURE(S)' : 'all checks passed'));

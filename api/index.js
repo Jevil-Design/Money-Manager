@@ -249,12 +249,10 @@ function getPool(url) {
     stale.end().catch(() => { /* nothing useful to do about a stale pool */ });
   }
   const Pool = getPoolClass();
-  const local = /@(localhost|127\.0\.0\.1)[:/]/.test(url);
   pool = new Pool({
-    connectionString: url,
-    /* Providers require TLS; certificates are verified unless the operator
-       has said their provider uses one Node does not trust. */
-    ssl: local ? false : { rejectUnauthorized: process.env.PGSSL_NO_VERIFY !== '1' },
+    /* sslmode is removed from the URL deliberately — see sslConfigFor. */
+    connectionString: withoutSslMode(url),
+    ssl: sslConfigFor(url),
     max: 1,
     idleTimeoutMillis: 30000,
     connectionTimeoutMillis: 12000,
@@ -271,6 +269,62 @@ function getPool(url) {
     console.error('money-manager db: idle connection dropped — ' + scrub(err && err.message));
   });
   return pool;
+}
+
+/* TLS, decided here rather than by the connection string.
+ *
+ * node-postgres DISCARDS an explicit `ssl` option when the connection string
+ * carries `sslmode` — with `?sslmode=require` (which is what Neon, Supabase
+ * and most providers hand you) the computed config comes out as `{}`, and
+ * whatever we passed is thrown away. Two consequences, one of them a silent
+ * security downgrade:
+ *
+ *   - PGSSL_NO_VERIFY would do nothing at all, so the one documented escape
+ *     hatch for a provider whose certificate Node does not trust would appear
+ *     to be ignored, with no message saying why.
+ *   - `{}` happens to verify today, because that is Node's default. But
+ *     pg-connection-string v3 / pg v9 change `sslmode=require` to libpq
+ *     semantics — encrypt without verifying — and an explicit
+ *     rejectUnauthorized:true would still be discarded. The connection would
+ *     quietly become open to interception on a driver upgrade.
+ *
+ * So the parameter is stripped from the URL and the decision made here, where
+ * it is visible and testable. The provider's intent is still honoured: an
+ * explicit `sslmode=disable` means no TLS, and `no-verify` means encrypt
+ * without checking the certificate.
+ */
+function sslMode(url) {
+  const m = String(url).match(/[?&]sslmode=([^&]*)/i);
+  return m ? decodeURIComponent(m[1]).toLowerCase() : '';
+}
+
+function isLocalHost(url) {
+  return /@(localhost|127\.0\.0\.1|\[::1\])[:/]/.test(String(url));
+}
+
+function sslConfigFor(url) {
+  const mode = sslMode(url);
+  /* Plain TCP, only where it was actually asked for or is unavoidable. */
+  if (mode === 'disable') return false;
+  if (!mode && isLocalHost(url)) return false;
+  /* Encrypt but do not verify — the operator's escape hatch, and what the
+     provider asked for if they said no-verify. */
+  if (process.env.PGSSL_NO_VERIFY === '1' || mode === 'no-verify') {
+    return { rejectUnauthorized: false };
+  }
+  /* Everything else: encrypt AND verify the certificate. */
+  return { rejectUnauthorized: true };
+}
+
+/* Remove sslmode textually rather than by re-serialising the URL, so the
+   password in the userinfo is never re-encoded — a round trip through
+   URL.toString() can change it and break authentication. */
+function withoutSslMode(url) {
+  const q = String(url).indexOf('?');
+  if (q < 0) return url;
+  const base = url.slice(0, q);
+  const kept = url.slice(q + 1).split('&').filter((p) => p && !/^sslmode=/i.test(p));
+  return kept.length ? base + '?' + kept.join('&') : base;
 }
 
 /* Check the configured connection string before anything tries to use it, so

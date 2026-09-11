@@ -215,6 +215,19 @@ function freshHandler(env) {
     const a = { name: 'User A', email: 'a' + stamp + '@example.com', password: 'abcdefg1' };
     const b = { name: 'User B', email: 'b' + stamp + '@example.com', password: 'hijklmn2' };
 
+    /* Name both addresses in the allowlist.
+       claimAccount() reads ALLOWED_EMAILS at request time, so this can be set
+       now that the addresses exist. Without it the empty-allowlist rule takes
+       over — "the first account claims this deployment" — and User B would be
+       refused with 403, so the isolation checks below would never run. It also
+       makes the run independent of whatever the database already contains. */
+    process.env.ALLOWED_EMAILS = a.email + ', ' + b.email;
+
+    /* Hoisted so the finally below can always reach them: a failure anywhere
+       in this block must still delete the accounts it created, or a scratch
+       database slowly fills with orphaned test users. */
+    let tokenA = '', tokenB = '';
+    try {
     const h = await call(port, 'GET', '/api/health');
     ok('health reports connected', h.body.status === 'ok' && h.body.database === 'connected',
       JSON.stringify(h.body));
@@ -232,7 +245,7 @@ function freshHandler(env) {
       ra.body.state && ra.body.state.data.accounts.length === 4 && ra.body.state.data.txns.length > 0,
       JSON.stringify(ra.body.state && ra.body.state.rev));
     ok('TEST 11: the document arrives at revision 1', ra.body.state.rev === 1);
-    const tokenA = ra.body.token;
+    tokenA = ra.body.token;
 
     /* TEST 3 — the same email again. */
     const dupe = await call(port, 'POST', '/api/v1/auth/register',
@@ -305,7 +318,7 @@ function freshHandler(env) {
       Object.assign({ password2: b.password, samples: false }, b));
     ok('TEST 9: a second account can be created', rb.status === 200 && !!rb.body.token,
       JSON.stringify(rb.body).slice(0, 200));
-    const tokenB = rb.body.token;
+    tokenB = rb.body.token;
     const stB = await call(port, 'GET', '/api/v1/state', undefined, { Authorization: 'Bearer ' + tokenB });
     ok('TEST 9: User B sees their own empty book', stB.status === 200 &&
       stB.body.data.accounts.length === 0 && stB.body.data.txns.length === 0,
@@ -349,10 +362,21 @@ function freshHandler(env) {
     ok('no token is 401', noTok.status === 401, String(noTok.status));
     const junkTok = await call(port, 'GET', '/api/v1/state', undefined, { Authorization: 'Bearer nonsense' });
     ok('a junk token is 401', junkTok.status === 401, String(junkTok.status));
-    const inject = await call(port, 'GET', "/api/v1/backup/' OR 1=1 --", undefined,
+    /* Injection attempts in a path id. Percent-encoded, because that is how a
+       browser would send them and because http.request refuses a raw space —
+       the server decodes the segment before it ever reaches a query, so this
+       is the same payload either way. */
+    for (const payload of ["' OR 1=1 --", "1'; DROP TABLE mm_user; --", "' UNION SELECT * FROM mm_user --"]) {
+      const inject = await call(port, 'GET', '/api/v1/backup/' + encodeURIComponent(payload),
+        undefined, { Authorization: 'Bearer ' + tokenA });
+      ok('injection in a path id is just a 404: ' + payload,
+        inject.status === 404, String(inject.status) + ' ' + inject.raw.slice(0, 120));
+    }
+    /* ...and the table it tried to drop is still there. */
+    const stillAlive = await call(port, 'GET', '/api/v1/auth/session', undefined,
       { Authorization: 'Bearer ' + tokenA });
-    ok('a SQL-injection attempt in a path id is just a 404',
-      inject.status === 404, String(inject.status) + ' ' + inject.raw.slice(0, 120));
+    ok('the accounts table survived the injection attempts', stillAlive.status === 200,
+      String(stillAlive.status));
     const badDoc = await call(port, 'PUT', '/api/v1/state',
       { rev: 0, data: { nope: true } }, { Authorization: 'Bearer ' + tokenB });
     ok('a malformed document is refused with 422', badDoc.status === 422, String(badDoc.status));
@@ -374,13 +398,17 @@ function freshHandler(env) {
     const otherStill = await call(port, 'GET', '/api/v1/state', undefined, { Authorization: 'Bearer ' + tokenA });
     ok('the other session on that account still works', otherStill.status === 200);
 
-    /* Clean up after ourselves. */
-    for (const [tok, pw] of [[tokenA, a.password], [tokenB, b.password]]) {
-      const del = await call(port, 'DELETE', '/api/v1/auth/account', { password: pw },
-        { Authorization: 'Bearer ' + tok });
-      ok('the test account is removed', del.status === 200, String(del.status));
+    } finally {
+      /* Clean up after ourselves, whether or not the checks above passed. */
+      for (const [tok, who, pw] of [[tokenA, 'A', a.password], [tokenB, 'B', b.password]]) {
+        if (!tok) continue;
+        const del = await call(port, 'DELETE', '/api/v1/auth/account', { password: pw },
+          { Authorization: 'Bearer ' + tok });
+        ok('test account ' + who + ' was removed', del.status === 200,
+          String(del.status) + ' — delete it by hand if this failed');
+      }
+      server.close();
     }
-    server.close();
   }
 
   console.log('\n' + (fails ? fails + ' FAILURE(S)' : 'all checks passed'));
