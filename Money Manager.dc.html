@@ -1144,13 +1144,25 @@
             </div>
             <button onClick="{{ doLogin }}" disabled="{{ authBusy }}" style="{{ primaryBtnStyle }}">{{ loginLabel }}</button>
             <button onClick="{{ goSignup }}" disabled="{{ authBusy }}" style="width:100%;height:24px;margin-top:6px;border:1px solid var(--c-a8c0d8);background:linear-gradient(var(--c-surface),var(--c-e8f0f8));cursor:pointer;border-radius:2px">Create an account</button>
-            <sc-if value="{{ resetAvailable }}">
-              <button onClick="{{ goForgot }}" disabled="{{ authBusy }}" style="width:100%;height:22px;margin-top:6px;border:0;background:none;color:var(--c-2b7fd0);cursor:pointer;text-decoration:underline;font-size:11px;padding:0">Forgot your password?</button>
-            </sc-if>
+            <button onClick="{{ goForgot }}" disabled="{{ authBusy }}" style="width:100%;height:22px;margin-top:6px;border:0;background:none;color:var(--c-2b7fd0);cursor:pointer;text-decoration:underline;font-size:11px;padding:0">Forgot your password?</button>
           </div>
         </sc-if>
 
         <sc-if value="{{ isForgot }}">
+          <sc-if value="{{ resetKnownOff }}">
+            <div style="padding:0 14px 10px">
+              <div style="padding:7px 9px;border:1px solid var(--c-fde5c4);background:var(--c-fff5e8);color:var(--c-b3701c)">
+                <div style="font-weight:600">Reset by email is not set up yet.</div>
+                <div style="margin-top:3px;color:var(--c-3c5163);font-size:11px">Nothing is wrong with your account — this deployment simply has no mail service configured, so it cannot send you a code. Until it does, a backup file (Settings → Backup) is the only way back into a locked-out account.</div>
+              </div>
+              <div style="margin-top:8px;color:var(--c-7b8b9b);font-size:11px">
+                <b>If you administer this deployment:</b> add a mail API key and a sender address to the project's environment variables, then redeploy. {{ authServer }}/api/health reports whether it is working.
+              </div>
+              <button onClick="{{ goLogin }}" style="width:100%;height:28px;margin-top:10px;border:1px solid var(--c-a8c0d8);background:linear-gradient(var(--c-surface),var(--c-e8f0f8));cursor:pointer;border-radius:2px">Back to sign in</button>
+            </div>
+          </sc-if>
+
+          <sc-if value="{{ resetCanAsk }}">
           <div style="padding:0 14px 10px">
             <label style="display:block;color:var(--c-3c5163);margin-bottom:3px">Email</label>
             <input type="email" value="{{ forgotEmail }}" onChange="{{ onForgotEmail }}" onKeyDown="{{ onForgotKey }}" aria-label="Email" autoComplete="email" disabled="{{ authBusy }}" autoFocus="{{ true }}" style="width:100%;height:26px;border:1px solid var(--c-a8c0d8);padding:0 6px;border-radius:2px;background:var(--c-surface)" />
@@ -1158,6 +1170,7 @@
             <button onClick="{{ doForgot }}" disabled="{{ authBusy }}" style="{{ primaryBtnStyle }}">{{ forgotLabel }}</button>
             <button onClick="{{ goLogin }}" disabled="{{ authBusy }}" style="width:100%;height:24px;margin-top:6px;border:1px solid var(--c-a8c0d8);background:linear-gradient(var(--c-surface),var(--c-e8f0f8));cursor:pointer;border-radius:2px">Back to sign in</button>
           </div>
+          </sc-if>
         </sc-if>
 
         <sc-if value="{{ isReset }}">
@@ -1771,7 +1784,10 @@ class Component extends DCLogic {
         /* Password reset. resetAvailable is answered by the server, because
            only it knows whether email is configured — offering a link that
            cannot send anything is worse than not offering it. */
-        resetAvailable: false, resetToken: '',
+        /* Three states, not two: we do not know yet, the server can send, the
+           server cannot.  "Do not know" must not look like "cannot", or the
+           link flickers off on a slow probe. */
+        resetAvailable: false, resetProbed: false, resetToken: '',
         form: { name: '', email: '', password: '', password2: '', samples: false, encrypt: false, code: '' }
       }
     };
@@ -2657,7 +2673,9 @@ class Component extends DCLogic {
   probeServer() {
     var self = this;
     return this.api('/api/v1/health', { noAuth: true }).then(function (h) {
-      self.setAuth({ resetAvailable: !!(h && h.passwordReset), dbDown: false });
+      self.setAuth({
+        resetAvailable: !!(h && h.passwordReset), resetProbed: true, dbDown: false
+      });
       return h;
     }).catch(function (e) {
       /* A database outage is worth showing here rather than waiting for the
@@ -2665,6 +2683,10 @@ class Component extends DCLogic {
          out: once the app is open, saveNow() is the honest signal and this
          probe must not contradict it. */
       var patch = { resetAvailable: false };
+      /* An unreachable server says nothing about whether mail is configured,
+         so leave that unknown rather than claiming it is off. */
+      if (mmIsDbDown(e) || e.status === 0) patch.resetProbed = false;
+      else patch.resetProbed = true;
       if (self.state.auth.phase !== 'ready') patch.dbDown = mmIsDbDown(e);
       self.setAuth(patch);
       return null;
@@ -8808,8 +8830,15 @@ class Component extends DCLogic {
       isForgot: phase === 'forgot',
       isReset: phase === 'reset',
 
-      /* ----- forgotten password ----- */
+      /* ----- forgotten password -----
+         The link is always offered.  Hiding it when mail is unconfigured
+         seemed tidy and was a mistake: a missing link reads as a missing
+         feature, and the person most likely to notice is the one who can go
+         and configure it.  So the screen behind it explains itself instead. */
       resetAvailable: !!a.resetAvailable,
+      /* Only once we have actually been told mail is off. */
+      resetKnownOff: !!a.resetProbed && !a.resetAvailable,
+      resetCanAsk: !(a.resetProbed && !a.resetAvailable),
       resetMinutes: 15,
       goForgot: function () { self.goForgot(); },
       doForgot: function () { self.doForgot(); },

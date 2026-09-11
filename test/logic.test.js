@@ -7,6 +7,9 @@ const APP = process.argv[2] || path.join(__dirname, "..", "Money Manager.dc.html
 const API = process.argv[3] || path.join(__dirname, "..", "api", "index.js");
 
 let fails = 0;
+/* Assigned by the probeServer checks below and awaited in the async section,
+   so their assertions are counted before the summary is printed. */
+let probeAfterOffline = null, probeAfterOff = null, probeAfterOn = null;
 const ok = (name, cond, extra) => {
   console.log((cond ? '  PASS  ' : '  FAIL  ') + name + (cond || extra === undefined ? '' : '  -> ' + extra));
   if (!cond) fails++;
@@ -116,24 +119,69 @@ ok('progress is shown as a notice, not an error', v.hasAuthNotice === true && v.
 v = mk({ phase: 'signup', notice: 'x', error: 'y' });
 ok('an error wins over a stale notice', v.hasAuthNotice === false && v.hasAuthError === true);
 
-console.log('\nThe forgot-password and reset screens render in every state');
-v = mk({ phase: 'login', resetAvailable: false });
-ok('the link is hidden when the server cannot send email', v.resetAvailable === false);
+console.log('\nThe forgot-password link is always offered, and explains itself');
+/* Hiding the link when mail was unconfigured made the feature look absent.
+   It is always shown now; the screen behind it is what varies. */
+v = mk({ phase: 'login', resetProbed: true, resetAvailable: false });
+ok('the link is offered even when mail is not configured', typeof v.goForgot === 'function');
 ok('and the sign-in screen is otherwise unchanged', v.isLogin === true && v.isForgot === false);
 
-v = mk({ phase: 'login', resetAvailable: true });
-ok('the link appears once the server says email works', v.resetAvailable === true);
-ok('it has something to click', typeof v.goForgot === 'function');
+v = mk({ phase: 'forgot', resetProbed: true, resetAvailable: false });
+ok('the screen says reset is not set up', v.resetKnownOff === true);
+ok('and does not ask for an address it cannot use', v.resetCanAsk === false);
 
-v = mk({ phase: 'forgot', resetAvailable: true });
+v = mk({ phase: 'forgot', resetProbed: true, resetAvailable: true });
+ok('with mail configured it asks for the address', v.resetCanAsk === true);
+ok('and shows no "not set up" panel', v.resetKnownOff === false);
+
+/* The probe is asynchronous. Before it answers, "unknown" must not be
+   rendered as "off" — that would flash the wrong panel on a slow network. */
+v = mk({ phase: 'forgot', resetProbed: false, resetAvailable: false });
+ok('before the probe answers it does not claim reset is off', v.resetKnownOff === false);
+ok('and still offers the form', v.resetCanAsk === true);
+
+v = mk({ phase: 'forgot', resetAvailable: true, resetProbed: true });
 ok('the forgot screen shows', v.isForgot === true && v.needsAuth === true);
 ok('it is titled for resetting', /reset/i.test(v.authTitle), v.authTitle);
 ok('it says a code will be emailed', /email a code/i.test(v.authSubtitle), v.authSubtitle);
 ok('it names the expiry', v.resetMinutes === 15);
 ok('the button reads plainly', v.forgotLabel === 'Email me a code', v.forgotLabel);
-v = mk({ phase: 'forgot', busy: true });
+v = mk({ phase: 'forgot', busy: true, resetProbed: true, resetAvailable: true });
 ok('while sending, the button is held and says so',
   v.authBusy === true && v.forgotLabel === 'Sending…', v.forgotLabel);
+
+/* An unreachable server tells us nothing about mail, so it must leave the
+   question open rather than answering it wrongly. */
+{
+  const c = new Component({});
+  Object.assign(c.state.auth, { phase: 'login', resetProbed: true, resetAvailable: true });
+  c.api = () => Promise.reject(Object.assign(new Error('offline'), { status: 0, offline: true }));
+  probeAfterOffline = c.probeServer().then(function () {
+    ok('an unreachable server leaves mail availability unknown',
+      c.state.auth.resetProbed === false, String(c.state.auth.resetProbed));
+    const vv = c.authVals();
+    ok('so the screen does not claim reset is off', vv.resetKnownOff === false);
+  });
+}
+{
+  const c = new Component({});
+  Object.assign(c.state.auth, { phase: 'login' });
+  c.api = () => Promise.resolve({ passwordReset: false, database: 'connected' });
+  probeAfterOff = c.probeServer().then(function () {
+    ok('a reachable server saying "no mail" is recorded as known-off',
+      c.state.auth.resetProbed === true && c.state.auth.resetAvailable === false);
+    ok('and the screen says so', c.authVals().resetKnownOff === true);
+  });
+}
+{
+  const c = new Component({});
+  Object.assign(c.state.auth, { phase: 'login' });
+  c.api = () => Promise.resolve({ passwordReset: true, database: 'connected' });
+  probeAfterOn = c.probeServer().then(function () {
+    ok('a server with mail configured enables the form',
+      c.state.auth.resetAvailable === true && c.authVals().resetCanAsk === true);
+  });
+}
 
 v = mk({ phase: 'reset', resetToken: '' });
 ok('the reset screen shows', v.isReset === true && v.needsAuth === true);
@@ -457,6 +505,8 @@ ok('the app document schema version matches the app', MM_SCHEMA === 4);
 
 console.log('\nPassword hashing');
 (async () => {
+  await Promise.all([probeAfterOffline, probeAfterOff, probeAfterOn]);
+
   /* A wrong code must not wipe the password just typed, and the code must not
      survive the failure — opposite mistakes, both annoying. */
   {
