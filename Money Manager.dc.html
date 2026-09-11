@@ -7642,7 +7642,38 @@ class Component extends DCLogic {
     write();
   }
 
-  parseCsv(text) {
+  /* Which character separates the columns?
+     "CSV" from an Indian bank is very often semicolon- or tab-separated, and
+     assuming a comma put every field into one column — which looks exactly
+     like a file that could not be read. Count candidates outside quotes and
+     take the one that splits the most lines into the same number of columns. */
+  sniffDelimiter(text) {
+    var sample = String(text).split(/\r?\n/).filter(function (l) { return l.trim(); }).slice(0, 20);
+    if (!sample.length) return ',';
+    var best = ',', bestScore = -1;
+    [',', ';', '\t', '|'].forEach(function (d) {
+      var counts = sample.map(function (line) {
+        var n = 0, q = false;
+        for (var i = 0; i < line.length; i++) {
+          if (line[i] === '"') q = !q;
+          else if (!q && line[i] === d) n++;
+        }
+        return n;
+      });
+      var withAny = counts.filter(function (n) { return n > 0; }).length;
+      if (!withAny) return;
+      /* Reward agreement: a real delimiter gives the same count on most rows. */
+      var tally = {};
+      counts.forEach(function (n) { if (n > 0) tally[n] = (tally[n] || 0) + 1; });
+      var agree = Math.max.apply(null, Object.keys(tally).map(function (k) { return tally[k]; }));
+      var score = agree * 100 + withAny;
+      if (score > bestScore) { bestScore = score; best = d; }
+    });
+    return best;
+  }
+
+  parseCsv(text, delim) {
+    var d = delim || this.sniffDelimiter(text);
     var rows = [], row = [], cur = '', q = false;
     for (var i = 0; i < text.length; i++) {
       var ch = text[i];
@@ -7651,7 +7682,7 @@ class Component extends DCLogic {
         else if (ch === '"') q = false;
         else cur += ch;
       } else if (ch === '"') q = true;
-      else if (ch === ',') { row.push(cur); cur = ''; }
+      else if (ch === d) { row.push(cur); cur = ''; }
       else if (ch === '\n') { row.push(cur); rows.push(row); row = []; cur = ''; }
       else if (ch !== '\r') cur += ch;
     }
@@ -7700,24 +7731,89 @@ class Component extends DCLogic {
     return '';
   }
   normDate(raw) {
-    var s = String(raw || '').trim();
+    /* A real date cell, from XLSX read with cellDates. */
+    if (raw instanceof Date) {
+      return isNaN(raw.getTime()) ? '' : mmIso(raw);
+    }
+    var s = String(raw == null ? '' : raw).trim();
+    if (!s) return '';
     if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+    /* 2026-9-3 as well as 2026-09-03 */
+    var iso = s.match(/^(\d{4})[\/\-.](\d{1,2})[\/\-.](\d{1,2})$/);
+    if (iso) return iso[1] + '-' + mmPad(iso[2]) + '-' + mmPad(iso[3]);
+
     var m = s.match(/^(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2,4})$/);
     if (m) {
       var y = m[3].length === 2 ? '20' + m[3] : m[3];
-      return y + '-' + mmPad(m[2]) + '-' + mmPad(m[1]);
+      var day = +m[1], mon = +m[2];
+      /* Indian statements write dd/mm, which is the assumption. But a second
+         field above 12 cannot be a month, so that one is unambiguously
+         mm/dd — without this, 03/15/2026 became month 15 and the row was
+         thrown away as "no usable date". */
+      if (mon > 12 && day <= 12) { day = +m[2]; mon = +m[1]; }
+      return y + '-' + mmPad(mon) + '-' + mmPad(day);
     }
+
     var months = { jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6, jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12 };
-    m = s.match(/^(\d{1,2})[\s\-\/]*([A-Za-z]{3})[a-z]*[\s\-\/,]*(\d{2,4})$/);
+    /* 15-Jan-2026, 15 Jan 26, 15/Jan/2026 */
+    m = s.match(/^(\d{1,2})[\s\-\/.]*([A-Za-z]{3})[a-z]*[\s\-\/.,]*(\d{2,4})$/);
     if (m && months[m[2].toLowerCase()]) {
       var y2 = m[3].length === 2 ? '20' + m[3] : m[3];
       return y2 + '-' + mmPad(months[m[2].toLowerCase()]) + '-' + mmPad(m[1]);
     }
-    if (typeof raw === 'number' && raw > 20000 && raw < 60000) {
-      var d = new Date(Date.UTC(1899, 11, 30) + raw * 86400000);
+    /* Jan 15, 2026 — the other way round. */
+    m = s.match(/^([A-Za-z]{3})[a-z]*[\s\-\/.]*(\d{1,2})[\s\-\/.,]*(\d{2,4})$/);
+    if (m && months[m[1].toLowerCase()]) {
+      var y3 = m[3].length === 2 ? '20' + m[3] : m[3];
+      return y3 + '-' + mmPad(months[m[1].toLowerCase()]) + '-' + mmPad(m[2]);
+    }
+    /* Some statements carry a time: take the date off the front. */
+    m = s.match(/^(\d{1,2}[\/\-.]\d{1,2}[\/\-.]\d{2,4}|\d{4}[\/\-.]\d{1,2}[\/\-.]\d{1,2})[\sT]/);
+    if (m) return this.normDate(m[1]);
+
+    /* An Excel serial. This has to accept the STRING form too: every cell is
+       stringified on the way out of the sheet, so a date cell arrives here as
+       "45678" and the old numeric-only check could never fire — which made
+       every date in a spreadsheet unreadable. Five digits only, so a year or
+       an amount cannot be mistaken for one. */
+    var serial = typeof raw === 'number' ? raw
+      : (/^\d{5}(\.\d+)?$/.test(s) ? parseFloat(s) : NaN);
+    if (isFinite(serial) && serial > 20000 && serial < 60000) {
+      /* Excel's epoch is 1899-12-30 once its 1900 leap-year bug is accounted
+         for, which it is for every date a bank statement can contain. */
+      var d = new Date(Date.UTC(1899, 11, 30) + Math.floor(serial) * 86400000);
       return mmIso(new Date(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
     }
     return s;
+  }
+
+  /* One place that turns any statement's money column into a number.
+     Returns it SIGNED — the sign is often the only thing saying which
+     direction the money went. */
+  impAmount(v) {
+    if (typeof v === 'number') return isFinite(v) ? v : 0;
+    var s = String(v == null ? '' : v).replace(/[₹$£€\s]/g, '');
+    if (!s) return 0;
+    /* Accounting formats: (1,234.56) and a trailing Dr both mean money out. */
+    var neg = /^\(.*\)$/.test(s) || s.indexOf('-') >= 0 || /dr$/i.test(s);
+    s = s.replace(/[()]/g, '');
+    /* 1.234,56 is European; 1,234.56 and 1,23,456.78 are not.
+       A comma sitting after the last dot is a DECIMAL comma only when it is
+       the only comma and one or two digits follow it. Otherwise it is a
+       thousands group: "1,200" is twelve hundred rupees, and reading that
+       comma as a decimal point turned it into 1.2. */
+    var lastDot = s.lastIndexOf('.'), lastComma = s.lastIndexOf(',');
+    if (lastComma > lastDot) {
+      var onlyComma = s.indexOf(',') === lastComma;
+      var tail = s.slice(lastComma + 1);
+      if (onlyComma && /^\d{1,2}$/.test(tail)) s = s.replace(/\./g, '').replace(',', '.');
+      else s = s.replace(/,/g, '');
+    } else {
+      s = s.replace(/,/g, '');
+    }
+    var n = parseFloat(s.replace(/[^0-9.]/g, ''));
+    if (!isFinite(n)) return 0;
+    return neg ? -Math.abs(n) : Math.abs(n);
   }
   parsePdfStatement(buffer) {
     var self = this;
@@ -7733,15 +7829,26 @@ class Component extends DCLogic {
       return pages.reduce(function (chain, n) {
         return chain.then(function (lines) {
           return pdf.getPage(n).then(function (page) { return page.getTextContent(); }).then(function (tc) {
-            var byY = {};
-            tc.items.forEach(function (it) {
-              var y = Math.round(it.transform[5]);
-              var key = String(y);
-              if (!byY[key]) byY[key] = [];
-              byY[key].push({ x: it.transform[4], s: it.str });
+            /* Group the text fragments into rows by their baseline.
+               Keying on an exact rounded Y split a row whose cells sit a
+               pixel or two apart into several unusable lines — and a
+               statement row without its amount on it is a row that gets
+               thrown away. Cluster within a small tolerance instead. */
+            var items = tc.items
+              .filter(function (it) { return it.str && it.str.trim(); })
+              .map(function (it) { return { x: it.transform[4], y: it.transform[5], s: it.str }; })
+              .sort(function (a, b) { return (b.y - a.y) || (a.x - b.x); });
+            var groups = [], cur = null;
+            items.forEach(function (it) {
+              if (!cur || Math.abs(cur.y - it.y) > 2.5) {
+                cur = { y: it.y, parts: [] };
+                groups.push(cur);
+              }
+              cur.parts.push(it);
             });
-            Object.keys(byY).map(Number).sort(function (a, b) { return b - a; }).forEach(function (y) {
-              var text = byY[String(y)].sort(function (a, b) { return a.x - b.x; }).map(function (p) { return p.s; }).join(' ')
+            groups.forEach(function (g) {
+              var text = g.parts.sort(function (a, b) { return a.x - b.x; })
+                .map(function (p) { return p.s; }).join(' ')
                 .replace(/\s+/g, ' ').trim();
               if (text) lines.push(text);
             });
@@ -7756,9 +7863,12 @@ class Component extends DCLogic {
         if (!dm) return;
         var date = self.normDate(dm[1]);
         if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return;
-        var nums = line.match(/-?\d[\d,]*\.\d{2}/g);
+        /* Money on the line: a decimal figure, or a comma-grouped integer
+           like 1,200 for statements that print whole rupees. Deliberately not
+           a bare integer — that would pick up cheque and reference numbers. */
+        var nums = line.match(/-?\(?(?:\d[\d,]*\.\d{1,2}|\d{1,3}(?:,\d{2,3})+)\)?/g);
         if (!nums || !nums.length) return;
-        var val = function (x) { return parseFloat(String(x).replace(/,/g, '')); };
+        var val = function (x) { return Math.abs(self.impAmount(x)); };
         var amount, balance = null;
         if (nums.length >= 2) { amount = val(nums[nums.length - 2]); balance = val(nums[nums.length - 1]); }
         else amount = val(nums[0]);
@@ -7778,18 +7888,57 @@ class Component extends DCLogic {
   }
   parseSheet(buffer) {
     if (!window.XLSX) throw new Error('The spreadsheet reader hasn\u2019t loaded — check your connection and try again.');
-    var wb = window.XLSX.read(buffer, { type: 'array', cellDates: false });
-    var sheet = wb.Sheets[wb.SheetNames[0]];
+    /* cellDates: a date cell must come back as a Date, not as the serial
+       number it is stored as. Every cell is stringified below, and "45678"
+       is not a date anyone can read — which is what made spreadsheet imports
+       fail with "no usable date" on every single row. */
+    var wb = window.XLSX.read(buffer, { type: 'array', cellDates: true });
+    var sheetName = wb.SheetNames[0];
+    var sheet = wb.Sheets[sheetName];
+    if (!sheet) throw new Error('That spreadsheet has no readable sheet in it.');
     var grid = window.XLSX.utils.sheet_to_json(sheet, { header: 1, blankrows: false, defval: '' });
-    // bank sheets often carry a title block above the real header row
-    var headerIx = 0;
-    for (var i = 0; i < Math.min(grid.length, 25); i++) {
-      var joined = grid[i].join(' ').toLowerCase();
-      if (/date/.test(joined) && /(amount|debit|withdraw|credit|deposit)/.test(joined)) { headerIx = i; break; }
+    if (!grid.length) throw new Error('That spreadsheet’s first sheet is empty.');
+
+    /* Dates keep their meaning; everything else becomes trimmed text. */
+    var cell = function (c) {
+      if (c instanceof Date) return isNaN(c.getTime()) ? '' : mmIso(c);
+      return String(c == null ? '' : c).trim();
+    };
+    var cells = function (r) { return (r || []).map(cell); };
+
+    /* Bank sheets carry a title block — account number, period, address —
+       above the real header row. */
+    var headerIx = -1;
+    var limit = Math.min(grid.length, 40);
+    for (var i = 0; i < limit; i++) {
+      var joined = cells(grid[i]).join(' ').toLowerCase();
+      if (/date/.test(joined) && /(amount|debit|withdraw|credit|deposit|balance|particular|narration|description)/.test(joined)) {
+        headerIx = i;
+        break;
+      }
     }
+
+    if (headerIx < 0) {
+      /* No recognisable header. If the first row already looks like data,
+         taking it as the header would silently eat a transaction, so invent
+         column names instead and keep every row — the columns get mapped by
+         hand on the next screen anyway. */
+      var firstLooksLikeData = /^\d{4}-\d{2}-\d{2}$/.test(
+        this.normDate(grid[0] && grid[0][0]));
+      if (firstLooksLikeData) {
+        var width = 0;
+        for (i = 0; i < limit; i++) width = Math.max(width, (grid[i] || []).length);
+        var generic = [];
+        for (var c2 = 0; c2 < width; c2++) generic.push('Column ' + (c2 + 1));
+        return { headers: generic, rows: grid.map(cells), sheet: sheetName };
+      }
+      headerIx = 0;
+    }
+
     return {
-      headers: (grid[headerIx] || []).map(function (h) { return String(h).trim(); }),
-      rows: grid.slice(headerIx + 1).map(function (r) { return r.map(function (c) { return String(c == null ? '' : c); }); })
+      headers: cells(grid[headerIx]),
+      rows: grid.slice(headerIx + 1).map(cells),
+      sheet: sheetName
     };
   }
   autoMap(headers) {
@@ -7863,24 +8012,44 @@ class Component extends DCLogic {
     };
     r.readAsText(file);
   }
-  impRow(r) {
+  impRow(r, ctx) {
     var imp = this.state.imp, m = imp.map, self = this;
+    ctx = ctx || {};
     function g(k) { return m[k] === '' || m[k] == null ? '' : String(r[+m[k]] == null ? '' : r[+m[k]]).trim(); }
-    function num(v) {
-      /* Bank exports use 1,234.56 and sometimes (1,234.56) or a trailing Dr. */
-      var s = String(v).replace(/[₹\s]/g, '');
-      var n = parseFloat(s.replace(/[^0-9.\-]/g, ''));
-      return isFinite(n) ? Math.abs(n) : 0;
-    }
+    var num = function (v) { return self.impAmount(v); };
 
-    var debit = num(g('debit')), credit = num(g('credit'));
-    var amount = num(g('amount'));
+    /* Debit and credit columns are unsigned by convention; the column the
+       figure is IN is what says the direction. */
+    var debit = Math.abs(num(g('debit'))), credit = Math.abs(num(g('credit')));
+    var amountRaw = num(g('amount'));
+    var amount = Math.abs(amountRaw);
     var typeRaw = g('type').toLowerCase();
+    var balance = ctx.hasBalance ? num(g('balance')) : 0;
+
+    /* Which way did the money go?  In order of how much the statement is
+       actually telling us:
+         1. separate debit / credit columns — unambiguous
+         2. an explicit type or Dr/Cr marker
+         3. the sign on a single amount column, but only when this file
+            actually uses signs somewhere (an all-positive column says
+            nothing, and reading "+500" as income would invent income)
+         4. the running balance going down or up
+       Before this, a statement with one signed Amount column and no type
+       fell through to the default and every row — salary included — was
+       imported as an expense. */
     var type;
     if (debit > 0) { type = 'expense'; amount = debit; }
     else if (credit > 0) { type = 'income'; amount = credit; }
     else if (typeRaw.indexOf('income') >= 0 || typeRaw === 'cr' || typeRaw.indexOf('credit') >= 0 || typeRaw.indexOf('deposit') >= 0) type = 'income';
+    else if (typeRaw === 'dr' || typeRaw.indexOf('debit') >= 0 || typeRaw.indexOf('withdraw') >= 0 || typeRaw.indexOf('expense') >= 0) type = 'expense';
     else if (typeRaw.indexOf('transfer') >= 0) type = 'transfer';
+    else if (ctx.signedAmount && amountRaw !== 0) type = amountRaw < 0 ? 'expense' : 'income';
+    else if (ctx.hasBalance && balance !== 0 && ctx.prevBalance != null &&
+      Math.abs(Math.abs(balance - ctx.prevBalance) - amount) < 0.02) {
+      /* The balance moved by exactly this amount, so its direction is the
+         transaction's direction. */
+      type = balance < ctx.prevBalance ? 'expense' : 'income';
+    }
     else type = 'expense';
 
     var accName = g('account'), catName = g('category');
@@ -7925,7 +8094,8 @@ class Component extends DCLogic {
       catName: catName, catId: catId, guessed: !!matchedBy, matchedBy: matchedBy,
       sub: sub, contents: contents || details, details: details, ref: ref,
       payment: payment || 'Bank Transfer',
-      notes: g('notes'), tags: tags, amount: amount
+      notes: g('notes'), tags: tags, amount: amount,
+      balance: ctx.hasBalance ? balance : null
     };
   }
   /* Key for duplicate matching: same account, same day, same money. */
@@ -7946,7 +8116,32 @@ class Component extends DCLogic {
     if (!imp || !imp.rows || !imp.rows.length) return empty;
     var sig = 'imp:' + imp.name + '|' + imp.acctId + '|' + imp.autoCat + '|' + JSON.stringify(imp.map) + '|' + imp.rows.length;
     return this.cache(sig, function () {
-      var parsed = imp.rows.map(function (r, i) { var p = self.impRow(r); p.row = i + 1; return p; });
+      /* Two facts about the file as a whole, worked out before any row is
+         classified, because a single row cannot tell you either.
+           signedAmount — does the amount column ever carry a minus?  If so
+             the sign is meaningful and says the direction.
+           hasBalance   — is a running balance mapped?  Then a row with no
+             other direction marker can be settled by which way it moved. */
+      var amountCol = imp.map.amount;
+      var hasAmountCol = amountCol !== '' && amountCol != null;
+      var signedAmount = hasAmountCol && imp.rows.some(function (r) {
+        var raw = r[+amountCol];
+        if (typeof raw === 'number') return raw < 0;
+        var s = String(raw == null ? '' : raw);
+        return s.indexOf('-') >= 0 || /^\(.*\)$/.test(s.trim()) || /dr\s*$/i.test(s);
+      });
+      var balanceCol = imp.map.balance;
+      var hasBalance = balanceCol !== '' && balanceCol != null;
+
+      var prevBalance = null;
+      var parsed = imp.rows.map(function (r, i) {
+        var p = self.impRow(r, {
+          signedAmount: signedAmount, hasBalance: hasBalance, prevBalance: prevBalance
+        });
+        if (hasBalance && p.balance) prevBalance = p.balance;
+        p.row = i + 1;
+        return p;
+      });
 
       /* Index existing transactions so matching stays linear. */
       var byKey = {}, byRef = {};
