@@ -7,7 +7,7 @@
     "node": ">=20"
   },
   "scripts": {
-    "test": "node test/logic.test.js && node test/import.test.js && node test/pool.test.js && node test/cookie.test.js && node test/reset.test.js && node test/api.test.js",
+    "test": "node test/logic.test.js && node test/import.test.js && node test/pool.test.js && node test/cookie.test.js && node test/reset.test.js && node test/signup.test.js && node test/api.test.js",
     "test:logic": "node test/logic.test.js",
     "test:pool": "node test/pool.test.js",
     "test:api": "node test/api.test.js",
@@ -15,7 +15,8 @@
     "health": "node -e \"fetch(process.argv[1]+'/api/health').then(r=>r.json()).then(j=>console.log(JSON.stringify(j,null,2)))\"",
     "test:cookie": "node test/cookie.test.js",
     "test:reset": "node test/reset.test.js",
-    "test:import": "node test/import.test.js"
+    "test:import": "node test/import.test.js",
+    "test:signup": "node test/signup.test.js"
   },
   "dependencies": {
     "@neon/config": "^1.4.0",

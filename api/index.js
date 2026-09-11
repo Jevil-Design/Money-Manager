@@ -560,13 +560,29 @@ CREATE TABLE IF NOT EXISTS mm_reset (
 );
 CREATE INDEX IF NOT EXISTS mm_reset_user_idx ON mm_reset (user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS mm_reset_expiry_idx ON mm_reset (expires_at);
+
+/* --- rate limiting ----------------------------------------------------------
+   One row per counted event. The only table here with no user_id, because it
+   has to work before an account exists — which is exactly when signup abuse
+   happens.
+
+   The bucket holds an HMAC of the caller's address, never the address itself.
+   Rate limiting needs to recognise a repeat caller; it does not need a log of
+   who visited a personal finance site, and keeping one would be a liability
+   rather than a feature. */
+CREATE TABLE IF NOT EXISTS mm_rate (
+  id          BIGSERIAL PRIMARY KEY,
+  bucket      TEXT NOT NULL,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS mm_rate_bucket_idx ON mm_rate (bucket, created_at DESC);
 `;
 
 /* Bump when SCHEMA changes, so /health reports what a given database has had
    applied.  It is a record, not a gate: every statement in SCHEMA is
    CREATE/ALTER ... IF NOT EXISTS, so re-running the whole thing is safe,
    concurrent-safe, and never touches a row of data. */
-const SCHEMA_VERSION = '4';
+const SCHEMA_VERSION = '5';
 
 /* The tables are created on first use rather than by a separate migration
    step, so deploying needs nothing but a connection string.  Every statement
@@ -953,6 +969,149 @@ async function noteFailure(client, user) {
 }
 async function clearFailures(client, userId) {
   await query(client, 'UPDATE mm_user SET fail_count = 0, locked_until = NULL WHERE id = $1', [userId]).catch(() => {});
+}
+
+/* --------------------------------------------------------- who may sign up
+
+   Three explicit states, so the answer never has to be inferred:
+
+     open       anyone may create an account, subject to the rate limits below
+     closed     nobody may, which is what you want once your own accounts
+                exist and you are done
+     allowlist  only the addresses in ALLOWED_EMAILS (the default)
+
+   Unset behaves as it always did: ALLOWED_EMAILS if it is set, otherwise the
+   first account to register claims the deployment. Note that CLEARING
+   ALLOWED_EMAILS does not open anything up — with an account already in the
+   database that fallback refuses everybody, which is the opposite of what
+   someone reaching for it usually wants. Hence this switch.
+*/
+function signupPolicy() {
+  const raw = String(process.env.ALLOW_SIGNUPS || '').trim().toLowerCase();
+  if (raw === 'open' || raw === 'any' || raw === 'anyone' || raw === 'true' || raw === '1') return 'open';
+  if (raw === 'closed' || raw === 'none' || raw === 'false' || raw === '0') return 'closed';
+  return 'allowlist';
+}
+
+const intEnv = (name, dflt) => {
+  const n = parseInt(process.env[name] || '', 10);
+  return isFinite(n) && n >= 0 ? n : dflt;
+};
+
+/* ------------------------------------------------------------ rate limiting
+
+   Open registration on a public URL is an invitation to fill the database, so
+   it comes with limits rather than without. Three separate buckets, because
+   they stop different things:
+
+     signup-try     attempts from one caller. Stops someone hammering the
+                    endpoint. Generous, so a typo or a forgotten password
+                    does not lock a real person out.
+     signup-new     accounts actually created by one caller. Tight, because
+                    this is the one that fills the database.
+     signup-global  accounts created by everyone. The backstop for abuse
+                    spread across many addresses, which per-caller limits
+                    cannot see.
+*/
+const RATE = {
+  tryPerHour: intEnv('SIGNUP_LIMIT_TRIES', 10),
+  newPerHour: intEnv('SIGNUP_LIMIT_IP_HOUR', 3),
+  newPerDay: intEnv('SIGNUP_LIMIT_IP_DAY', 5),
+  globalPerHour: intEnv('SIGNUP_LIMIT_HOUR', 30)
+};
+const MAX_ACCOUNTS = intEnv('MAX_ACCOUNTS', 0);      /* 0 = no ceiling */
+
+/* The caller's address, as the platform sees it.
+   x-vercel-forwarded-for is written by Vercel's edge and overwrites anything
+   the client sent, so it cannot be spoofed. x-forwarded-for CAN be, by
+   anyone, which would make rate limiting decorative — it is only a fallback
+   for other hosts, and behind a different proxy the operator has to make sure
+   it is trustworthy. */
+function clientIp(req) {
+  const first = (v) => String(v || '').split(',')[0].trim();
+  return first(req.headers['x-vercel-forwarded-for']) ||
+    first(req.headers['x-real-ip']) ||
+    first(req.headers['x-forwarded-for']) ||
+    (req.socket && req.socket.remoteAddress) || '';
+}
+
+function rateBucket(prefix, req) {
+  const ip = clientIp(req);
+  if (!ip) return prefix + ':unknown';
+  const key = crypto.createHmac('sha256', AUTH_SECRET || 'mm-rate-limit')
+    .update(ip).digest('hex').slice(0, 32);
+  return prefix + ':' + key;
+}
+
+async function rateHits(client, bucket, minutes) {
+  const { rows } = await query(client,
+    `SELECT COUNT(*)::int AS n FROM mm_rate
+      WHERE bucket = $1 AND created_at > now() - ($2 || ' minutes')::interval`,
+    [bucket, String(minutes)]);
+  return Number(rows[0].n) || 0;
+}
+
+async function rateNote(client, bucket) {
+  await query(client, 'INSERT INTO mm_rate (bucket) VALUES ($1)', [bucket]).catch(() => {});
+  /* Housekeeping, occasionally rather than on every call — nothing here is
+     worth keeping for more than a couple of days. */
+  if (Math.random() < 0.05) {
+    await query(client, "DELETE FROM mm_rate WHERE created_at < now() - INTERVAL '2 days'")
+      .catch(() => {});
+  }
+}
+
+/* May this caller create an account right now?  Returns null to allow, or the
+   response to send. */
+async function signupGate(client, req) {
+  const tooMany = {
+    status: 429,
+    body: {
+      error: 'Too many accounts have been created from here recently. Please try again later.',
+      code: 'signup_throttled'
+    }
+  };
+
+  if (MAX_ACCOUNTS > 0) {
+    const { rows } = await query(client, 'SELECT COUNT(*)::int AS n FROM mm_user', []);
+    if (Number(rows[0].n) >= MAX_ACCOUNTS) {
+      console.error('money-manager signup: refused, the account ceiling of ' + MAX_ACCOUNTS + ' is reached');
+      return {
+        status: 403,
+        body: {
+          error: 'This deployment has reached the number of accounts it is configured to hold.',
+          code: 'signup_full'
+        }
+      };
+    }
+  }
+
+  const tryBucket = rateBucket('signup-try', req);
+  if (await rateHits(client, tryBucket, 60) >= RATE.tryPerHour) {
+    console.error('money-manager signup: refused, too many attempts from one caller');
+    return tooMany;
+  }
+  /* Counted before the answer is known, so failed attempts count too — that
+     is what makes it a limit on hammering rather than on success. */
+  await rateNote(client, tryBucket);
+
+  const newBucket = rateBucket('signup-new', req);
+  if (await rateHits(client, newBucket, 60) >= RATE.newPerHour ||
+    await rateHits(client, newBucket, 60 * 24) >= RATE.newPerDay) {
+    console.error('money-manager signup: refused, too many accounts from one caller');
+    return tooMany;
+  }
+  if (await rateHits(client, 'signup-new:global', 60) >= RATE.globalPerHour) {
+    console.error('money-manager signup: refused, the deployment-wide hourly limit is reached');
+    return tooMany;
+  }
+  return null;
+}
+
+/* Called once an account really has been created. */
+async function noteSignup(client, req) {
+  await rateNote(client, rateBucket('signup-new', req));
+  await rateNote(client, 'signup-new:global');
 }
 
 /* ------------------------------------------------------------ sending email
@@ -1646,9 +1805,19 @@ async function handleRequest(req, res) {
       passwordReset: mailConfigured(),
       passwordResetLink: mailConfigured() ? !!appOrigin() : null,
       googleSignIn: !!process.env.GOOGLE_CLIENT_ID,
-      accessPolicy: (process.env.ALLOWED_EMAILS || '').trim()
-        ? 'allowlist'
-        : 'first account claims this deployment',
+      signups: signupPolicy(),
+      accessPolicy: signupPolicy() === 'open' ? 'anyone may register'
+        : signupPolicy() === 'closed' ? 'closed to new accounts'
+          : (process.env.ALLOWED_EMAILS || '').trim()
+            ? 'allowlist'
+            : 'first account claims this deployment',
+      /* Only meaningful when signups are open; null keeps it from reading as
+         a limit that applies when it does not. */
+      signupLimits: signupPolicy() === 'open'
+        ? { triesPerHour: RATE.tryPerHour, perCallerPerHour: RATE.newPerHour,
+            perCallerPerDay: RATE.newPerDay, perHour: RATE.globalPerHour,
+            maxAccounts: MAX_ACCOUNTS || null }
+        : null,
       keepSnapshots: KEEP_SNAPSHOTS
     });
   }
@@ -1690,15 +1859,30 @@ async function handleRequest(req, res) {
            nothing about any account.
            It is also the cheap check: a refused caller never reaches the
            password hash, so hammering this endpoint costs almost nothing. */
-        if (!(await claimAccount(client, email))) {
-          /* Deliberately says nothing about this address, no environment
-             variable, and does not echo back what was typed. Enough for
-             someone who should have access to know what to ask for. */
+        const policy = signupPolicy();
+        if (policy === 'closed') {
           return send(res, 403, {
-            error: 'This deployment is not open for new accounts. ' +
-              'If you should have access, ask whoever runs it to add you.',
+            error: 'This deployment is not accepting new accounts.',
             code: 'not_allowed'
           });
+        }
+        if (policy === 'allowlist') {
+          if (!(await claimAccount(client, email))) {
+            /* Deliberately says nothing about this address, no environment
+               variable, and does not echo back what was typed. Enough for
+               someone who should have access to know what to ask for. */
+            return send(res, 403, {
+              error: 'This deployment is not open for new accounts. ' +
+                'If you should have access, ask whoever runs it to add you.',
+              code: 'not_allowed'
+            });
+          }
+        } else {
+          /* Open. The limits are the only thing standing between a public URL
+             and a database full of someone else's accounts, so they run before
+             any of the expensive work. */
+          const refuse = await signupGate(client, req);
+          if (refuse) return send(res, refuse.status, refuse.body);
         }
 
         const existing = await query(client, 'SELECT id FROM mm_user WHERE lower(email) = $1', [email]);
@@ -1749,6 +1933,10 @@ async function handleRequest(req, res) {
           }
           throw err;
         }
+        /* Counted only now that an account really exists, so a typo that
+           ended in a 409 does not use up someone's daily allowance. */
+        if (policy === 'open') await noteSignup(client, req);
+
         const u = await query(client, 'SELECT * FROM mm_user WHERE id = $1', [id]);
         setSessionCookie(res, req, token);
         return send(res, 200, {
