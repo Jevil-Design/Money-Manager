@@ -203,9 +203,22 @@ function explain(h) {
   /* ------------------------------------------------------------ full flow */
 
   console.log('\nThe full flow (two throwaway accounts, deleted at the end)');
+  /* The addresses can be pinned, because a deployment with ALLOWED_EMAILS set
+     will refuse anything not on the list — and putting a generated,
+     timestamped address on that list is impossible. Set MM_CHECK_EMAIL_A and
+     MM_CHECK_EMAIL_B to addresses you have allowed, run the check, then take
+     them off the list again. */
   const stamp = Date.now();
-  const A = { name: 'Check A', email: 'mm-check-a-' + stamp + '@example.com', password: 'abcdefg1' };
-  const B = { name: 'Check B', email: 'mm-check-b-' + stamp + '@example.com', password: 'hijklmn2' };
+  const A = {
+    name: 'Check A',
+    email: process.env.MM_CHECK_EMAIL_A || 'mm-check-a-' + stamp + '@example.com',
+    password: 'abcdefg1'
+  };
+  const B = {
+    name: 'Check B',
+    email: process.env.MM_CHECK_EMAIL_B || 'mm-check-b-' + stamp + '@example.com',
+    password: 'hijklmn2'
+  };
   let tokenA = '', tokenB = '';
 
   try {
