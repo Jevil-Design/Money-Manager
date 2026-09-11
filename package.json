@@ -1,9 +1,16 @@
 {
   "name": "money-manager",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "private": true,
-  "description": "Money Manager — the app is a static page; api/ is the backup & sync API for Vercel",
+  "description": "Money Manager — the app is a static page; api/ is the Postgres-backed auth, sync and backup API for Vercel",
   "engines": { "node": ">=20" },
+  "scripts": {
+    "test": "node test/logic.test.js && node test/api.test.js",
+    "test:logic": "node test/logic.test.js",
+    "test:api": "node test/api.test.js",
+    "verify": "node test/verify-deployment.js",
+    "health": "node -e \"fetch(process.argv[1]+'/api/health').then(r=>r.json()).then(j=>console.log(JSON.stringify(j,null,2)))\""
+  },
   "dependencies": {
     "pg": "^8.13.1"
   }

@@ -5,6 +5,15 @@
 # Excluding it leaves the serverless function in api/ as the only backend.
 server/
 
+# Tests. They run locally and in CI, not in the deployment.
+test/
+
 # Design-canvas scratch files, not needed by the app.
 .thumbnail
 uploads/
+
+# Never ship an environment file, even by accident. The template is harmless
+# but there is no reason for it to be in the bundle either.
+.env
+.env.*
+.env.example

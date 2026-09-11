@@ -1114,37 +1114,71 @@
           <div style="color:var(--c-3c5163);margin-top:3px">{{ authSubtitle }}</div>
         </div>
 
+        <sc-if value="{{ authDbDown }}">
+          <div role="alert" style="margin:0 14px 8px;padding:7px 9px;border:1px solid var(--c-b98a8a);background:var(--c-fdf2f2);color:var(--c-8c2a24)">
+            <div style="font-weight:600">Cloud database is currently unavailable.</div>
+            <div style="margin-top:3px;color:var(--c-3c5163);font-size:11px">Nothing has been saved or lost. This deployment needs a database attached before accounts can be created — the site administrator can do that from the hosting dashboard.</div>
+            <div style="display:flex;gap:6px;margin-top:7px">
+              <button onClick="{{ retryAuth }}" disabled="{{ authBusy }}" style="{{ retryBtnStyle }}">{{ retryLabel }}</button>
+              <button onClick="{{ openAdminHelp }}" style="height:23px;padding:0 10px;border:1px solid var(--c-a8c0d8);background:linear-gradient(var(--c-surface),var(--c-e8f0f8));cursor:pointer;border-radius:2px">Administrator info</button>
+            </div>
+          </div>
+        </sc-if>
+
         <sc-if value="{{ hasAuthError }}">
           <div role="alert" style="margin:0 14px 8px;padding:6px 8px;border:1px solid var(--c-b98a8a);background:var(--c-fdf2f2);color:var(--c-8c2a24)">{{ authError }}</div>
+        </sc-if>
+
+        <sc-if value="{{ hasAuthNotice }}">
+          <div role="status" style="margin:0 14px 8px;padding:6px 8px;border:1px solid var(--c-9db8d2);background:var(--c-eef5fb);color:var(--c-1c4470)">{{ authNotice }}</div>
         </sc-if>
 
         <sc-if value="{{ isLogin }}">
           <div style="padding:0 14px 10px">
             <label style="display:block;color:var(--c-3c5163);margin-bottom:3px">Email</label>
-            <input type="email" value="{{ authEmail }}" onChange="{{ onAuthEmail }}" onKeyDown="{{ onAuthKey }}" aria-label="Email" autoFocus="{{ true }}" style="width:100%;height:26px;border:1px solid var(--c-a8c0d8);padding:0 6px;border-radius:2px;background:var(--c-surface)" />
+            <input type="email" value="{{ authEmail }}" onChange="{{ onAuthEmail }}" onKeyDown="{{ onAuthKey }}" aria-label="Email" autoComplete="username" disabled="{{ authBusy }}" autoFocus="{{ true }}" style="width:100%;height:26px;border:1px solid var(--c-a8c0d8);padding:0 6px;border-radius:2px;background:var(--c-surface)" />
             <label style="display:block;color:var(--c-3c5163);margin:8px 0 3px">Password</label>
-            <input type="password" value="{{ authPassword }}" onChange="{{ onAuthPassword }}" onKeyDown="{{ onAuthKey }}" aria-label="Password" style="width:100%;height:26px;border:1px solid var(--c-a8c0d8);padding:0 6px;border-radius:2px;background:var(--c-surface)" />
-            <button onClick="{{ doLogin }}" style="width:100%;height:28px;margin-top:10px;border:1px solid var(--c-2f7a44);background:linear-gradient(var(--c-63b878),var(--c-3d8f52));color:var(--c-onaccent);font-weight:600;cursor:pointer;border-radius:2px">{{ loginLabel }}</button>
-            <button onClick="{{ goSignup }}" style="width:100%;height:24px;margin-top:6px;border:1px solid var(--c-a8c0d8);background:linear-gradient(var(--c-surface),var(--c-e8f0f8));cursor:pointer;border-radius:2px">Create an account</button>
+            <div style="display:flex;gap:4px">
+              <input type="{{ pwFieldType }}" value="{{ authPassword }}" onChange="{{ onAuthPassword }}" onKeyDown="{{ onAuthKey }}" aria-label="Password" autoComplete="current-password" disabled="{{ authBusy }}" style="flex:1;min-width:0;height:26px;border:1px solid var(--c-a8c0d8);padding:0 6px;border-radius:2px;background:var(--c-surface)" />
+              <button onClick="{{ togglePw }}" title="{{ pwToggleTitle }}" aria-label="{{ pwToggleTitle }}" style="width:44px;height:26px;flex:none;border:1px solid var(--c-a8c0d8);background:linear-gradient(var(--c-surface),var(--c-e8f0f8));cursor:pointer;border-radius:2px;font-size:11px">{{ pwToggleLabel }}</button>
+            </div>
+            <button onClick="{{ doLogin }}" disabled="{{ authBusy }}" style="{{ primaryBtnStyle }}">{{ loginLabel }}</button>
+            <button onClick="{{ goSignup }}" disabled="{{ authBusy }}" style="width:100%;height:24px;margin-top:6px;border:1px solid var(--c-a8c0d8);background:linear-gradient(var(--c-surface),var(--c-e8f0f8));cursor:pointer;border-radius:2px">Create an account</button>
           </div>
         </sc-if>
 
         <sc-if value="{{ isSignup }}">
           <div style="padding:0 14px 10px;display:grid;grid-template-columns:100px 1fr;gap:6px 8px;align-items:center">
             <label style="text-align:right;color:var(--c-3c5163)">Your name</label>
-            <input value="{{ signupName }}" onChange="{{ onSignupName }}" onKeyDown="{{ onAuthKey }}" aria-label="Your name" autoFocus="{{ true }}" style="height:25px;border:1px solid var(--c-a8c0d8);padding:0 6px;border-radius:2px;background:var(--c-surface);min-width:0" />
+            <input value="{{ signupName }}" onChange="{{ onSignupName }}" onKeyDown="{{ onAuthKey }}" aria-label="Your name" autoComplete="name" disabled="{{ authBusy }}" autoFocus="{{ true }}" style="{{ nameFieldStyle }}" />
 
             <label style="text-align:right;color:var(--c-3c5163)">Email</label>
-            <input type="email" value="{{ signupEmail }}" onChange="{{ onSignupEmail }}" onKeyDown="{{ onAuthKey }}" placeholder="optional" aria-label="Email" style="height:25px;border:1px solid var(--c-a8c0d8);padding:0 6px;border-radius:2px;background:var(--c-surface);min-width:0" />
+            <input type="email" value="{{ signupEmail }}" onChange="{{ onSignupEmail }}" onKeyDown="{{ onAuthKey }}" placeholder="you@example.com" aria-label="Email" autoComplete="email" disabled="{{ authBusy }}" style="{{ emailFieldStyle }}" />
 
             <label style="text-align:right;color:var(--c-3c5163)">Password</label>
-            <input type="password" value="{{ signupPassword }}" onChange="{{ onSignupPassword }}" onKeyDown="{{ onAuthKey }}" aria-label="Password" style="height:25px;border:1px solid var(--c-a8c0d8);padding:0 6px;border-radius:2px;background:var(--c-surface);min-width:0" />
+            <div style="display:flex;gap:4px;min-width:0">
+              <input type="{{ pwFieldType }}" value="{{ signupPassword }}" onChange="{{ onSignupPassword }}" onKeyDown="{{ onAuthKey }}" aria-label="Password" autoComplete="new-password" disabled="{{ authBusy }}" style="{{ pwFieldStyle }}" />
+              <button onClick="{{ togglePw }}" title="{{ pwToggleTitle }}" aria-label="{{ pwToggleTitle }}" style="width:44px;height:25px;flex:none;border:1px solid var(--c-a8c0d8);background:linear-gradient(var(--c-surface),var(--c-e8f0f8));cursor:pointer;border-radius:2px;font-size:11px">{{ pwToggleLabel }}</button>
+            </div>
 
             <label style="text-align:right;color:var(--c-3c5163)">Repeat</label>
-            <input type="password" value="{{ signupPassword2 }}" onChange="{{ onSignupPassword2 }}" onKeyDown="{{ onAuthKey }}" aria-label="Repeat password" style="height:25px;border:1px solid var(--c-a8c0d8);padding:0 6px;border-radius:2px;background:var(--c-surface);min-width:0" />
+            <input type="{{ pwFieldType }}" value="{{ signupPassword2 }}" onChange="{{ onSignupPassword2 }}" onKeyDown="{{ onAuthKey }}" aria-label="Repeat password" autoComplete="new-password" disabled="{{ authBusy }}" style="{{ pw2FieldStyle }}" />
 
             <span></span>
-            <span style="color:var(--c-7b8b9b);font-size:11px">{{ passwordHint }}</span>
+            <div>
+              <sc-if value="{{ hasPwStrength }}">
+                <div style="display:flex;align-items:center;gap:6px">
+                  <div style="flex:1;height:4px;border-radius:2px;background:var(--c-e8f0f8);overflow:hidden">
+                    <div style="{{ pwMeterStyle }}"></div>
+                  </div>
+                  <span style="{{ pwStrengthStyle }}">{{ pwStrengthLabel }}</span>
+                </div>
+              </sc-if>
+              <div style="color:var(--c-7b8b9b);font-size:11px;margin-top:2px">{{ passwordHint }}</div>
+              <sc-if value="{{ hasSignupIssue }}">
+                <div style="color:var(--c-8c2a24);font-size:11px;margin-top:2px">{{ signupIssue }}</div>
+              </sc-if>
+            </div>
 
             <span></span>
             <label style="display:flex;align-items:flex-start;gap:6px;cursor:pointer;color:var(--c-3c5163)">
@@ -1154,8 +1188,8 @@
 
           </div>
           <div style="padding:0 14px 10px">
-            <button onClick="{{ doSignup }}" style="width:100%;height:28px;border:1px solid var(--c-2f7a44);background:linear-gradient(var(--c-63b878),var(--c-3d8f52));color:var(--c-onaccent);font-weight:600;cursor:pointer;border-radius:2px">{{ signupLabel }}</button>
-            <button onClick="{{ goLogin }}" style="width:100%;height:24px;margin-top:6px;border:1px solid var(--c-a8c0d8);background:linear-gradient(var(--c-surface),var(--c-e8f0f8));cursor:pointer;border-radius:2px">Back to sign in</button>
+            <button onClick="{{ doSignup }}" disabled="{{ signupBlocked }}" style="{{ signupBtnStyle }}">{{ signupLabel }}</button>
+            <button onClick="{{ goLogin }}" disabled="{{ authBusy }}" style="width:100%;height:24px;margin-top:6px;border:1px solid var(--c-a8c0d8);background:linear-gradient(var(--c-surface),var(--c-e8f0f8));cursor:pointer;border-radius:2px">Back to sign in</button>
           </div>
         </sc-if>
 
@@ -1571,6 +1605,44 @@ function mmPasswordProblem(pw) {
   return '';
 }
 function mmValidEmail(e) { return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(e || '').trim()); }
+
+/* The one sentence shown when the server cannot reach its database.  It says
+   what is true and nothing about how the server is configured — no variable
+   names, no host, no credentials, no driver text. */
+var MM_DB_DOWN_MESSAGE = 'Cloud database is currently unavailable.';
+
+/* Which server replies mean "the database, not your input, is the problem".
+   The server sends a code precisely so this does not have to read prose. */
+var MM_DB_DOWN_CODES = ['no_database', 'db_unreachable', 'db_misconfigured', 'db_driver_missing'];
+function mmIsDbDown(e) {
+  return !!(e && e.code && MM_DB_DOWN_CODES.indexOf(e.code) >= 0);
+}
+
+/* A rough strength read-out for the sign-up form.  It is guidance, not a
+   gate: mmPasswordProblem() above is the rule that actually has to pass, and
+   the server enforces the same one independently.  Scored on length and on
+   how many different kinds of character are present, which is what actually
+   moves the cost of guessing. */
+function mmPasswordStrength(pw) {
+  pw = String(pw || '');
+  if (!pw) return { score: 0, label: '', colour: 'var(--c-7b8b9b)' };
+  var kinds = 0;
+  if (/[a-z]/.test(pw)) kinds++;
+  if (/[A-Z]/.test(pw)) kinds++;
+  if (/[0-9]/.test(pw)) kinds++;
+  if (/[^A-Za-z0-9]/.test(pw)) kinds++;
+  var score = 0;
+  if (pw.length >= 8) score++;
+  if (pw.length >= 12) score++;
+  if (kinds >= 3) score++;
+  if (pw.length >= 16 && kinds >= 3) score++;
+  /* One character class repeated, however long, is not strong. */
+  if (kinds < 2) score = Math.min(score, 1);
+  if (/^(.)\1+$/.test(pw)) score = 0;
+  var labels = ['Very weak', 'Weak', 'Fair', 'Good', 'Strong'];
+  var colours = ['var(--c-b23b31)', 'var(--c-b23b31)', 'var(--c-b3701c)', 'var(--c-35774a)', 'var(--c-1a6b3c)'];
+  return { score: score, label: labels[score], colour: colours[score] };
+}
 /* A stable-ish label for this device, so the server can say where a
    conflicting change came from. */
 function mmDeviceName() {
@@ -1646,7 +1718,7 @@ class Component extends DCLogic {
         phase: 'boot',            /* boot | signup | login | ready */
         users: [], selected: '', userId: '', name: '', email: '', colour: '',
         encrypted: false, guest: false, legacyFound: false,
-        busy: false, error: '', tries: 0, until: 0,
+        busy: false, error: '', notice: '', dbDown: false, showPw: false, tries: 0, until: 0,
         form: { name: '', email: '', password: '', password2: '', samples: false, encrypt: false }
       }
     };
@@ -1733,30 +1805,55 @@ class Component extends DCLogic {
      Sign-up and sign-in.  Both are server calls; the browser only ever holds
      the returned session token.
      ----------------------------------------------------------------------- */
+  /* Everything the form itself can rule out, in the order someone fills the
+     fields in, so the message always points at the field they are on.  The
+     server checks all of it again — this is only here to save a round trip
+     and to keep the button honest about whether it will work. */
+  signupProblem() {
+    var f = this.state.auth.form;
+    if (!String(f.name || '').trim()) return 'Enter the name you want to be known by.';
+    if (!mmValidEmail(f.email)) return 'Enter a valid email address.';
+    var problem = mmPasswordProblem(f.password);
+    if (problem) return problem;
+    if (!f.password2) return 'Repeat the password to confirm it.';
+    if (f.password !== f.password2) return 'The two passwords don’t match.';
+    return '';
+  }
+
   doSignup() {
     var self = this, a = this.state.auth, f = a.form;
     if (a.busy) return;
+    var problem = this.signupProblem();
+    if (problem) { this.authError(problem); return; }
     var name = String(f.name || '').trim();
     var email = String(f.email || '').trim();
-    if (!name) { this.authError('Enter the name you want to be known by.'); return; }
-    if (!mmValidEmail(email)) { this.authError('Enter a valid email address.'); return; }
-    var problem = mmPasswordProblem(f.password);
-    if (problem) { this.authError(problem); return; }
-    if (f.password !== f.password2) { this.authError('The two passwords don’t match.'); return; }
+    var samples = !!f.samples;
 
-    this.setAuth({ busy: true, error: '' });
+    this.setAuth({ busy: true, error: '', dbDown: false, notice: 'Creating account…' });
     this.api('/api/v1/auth/register', {
       method: 'POST', noAuth: true,
-      json: { name: name, email: email, password: f.password }
+      json: {
+        name: name, email: email,
+        password: f.password, password2: f.password2, samples: samples
+      }
     }).then(function (r) {
       self.setToken(r.token);
       self.rememberEmail(email);
-      self.docRev = 0;
-      var db = mmNewUserDb(!!f.samples);
+      /* The server created the account, its settings, its default categories
+         and any sample data in one transaction, and handed the document back
+         with its revision.  Open that, rather than writing a second document
+         over it — which would be a stale-revision conflict on a brand-new
+         account. */
+      var hasServerDoc = !!(r.state && r.state.data);
+      var db = hasServerDoc ? self.migrate(r.state.data) : mmNewUserDb(samples);
+      var needsSave = !hasServerDoc || !!db.__migrated;
+      delete db.__migrated;
+      self.docRev = Number((r.state && r.state.rev) || 0);
+      self.setAuth({ notice: 'Account created successfully. Opening Money Manager…' });
       self.enterSession(r.user, db, 'Account created. Welcome, ' + name + '.');
-      return self.saveNow();
+      return needsSave ? self.saveNow() : true;
     }).catch(function (e) {
-      self.authError(e.message);
+      self.authError(e.message, e.code);
     });
   }
 
@@ -1767,25 +1864,66 @@ class Component extends DCLogic {
     if (!mmValidEmail(email)) { this.authError('Enter your email address.'); return; }
     if (!f.password) { this.authError('Enter your password.'); return; }
 
-    this.setAuth({ busy: true, error: '' });
+    this.setAuth({ busy: true, error: '', dbDown: false, notice: 'Signing in…' });
     this.api('/api/v1/auth/login', {
       method: 'POST', noAuth: true,
       json: { email: email, password: f.password }
     }).then(function (r) {
       self.setToken(r.token);
       self.rememberEmail(email);
+      self.setAuth({ notice: 'Opening your books…' });
       return self.loadDocument(r.user);
     }).catch(function (e) {
       self.setAuth({
-        busy: false, error: e.message,
+        busy: false, notice: '',
+        dbDown: mmIsDbDown(e),
+        error: mmIsDbDown(e) ? '' : e.message,
+        /* Never leave a password in a field the person is about to retype. */
         form: Object.assign({}, self.state.auth.form, { password: '' })
       });
+    });
+  }
+
+  /* The Retry offered alongside "Cloud database is currently unavailable".
+     It asks the health endpoint rather than silently replaying the sign-up,
+     so the answer is about the database and not about the form. */
+  retryAuth() {
+    var self = this;
+    if (this.state.auth.busy) return;
+    this.setAuth({ busy: true, error: '', notice: 'Checking the server…' });
+    this.api('/api/v1/health', { noAuth: true }).then(function (h) {
+      if (h && h.database === 'connected') {
+        self.setAuth({
+          busy: false, dbDown: false, error: '',
+          notice: 'The database is reachable again — please try again.'
+        });
+      } else {
+        self.setAuth({ busy: false, dbDown: true, error: '', notice: '' });
+      }
+    }).catch(function () {
+      self.setAuth({ busy: false, dbDown: true, error: '', notice: '' });
+    });
+  }
+
+  /* What an administrator needs to know, and nothing an end user could use to
+     reach the database.  The health endpoint is where the actual diagnosis
+     lives, and it reports variable names only — never their values. */
+  openAdminHelp() {
+    this.setAuth({
+      notice: 'For the administrator: this deployment has no reachable Postgres database. ' +
+        'Attach one in the hosting dashboard, or set the database URL in the project’s ' +
+        'environment variables, then redeploy — environment changes only reach the app on the ' +
+        'next deployment. ' + (this.apiBase() || '') + '/api/health reports the exact status.'
     });
   }
 
   rememberEmail(email) {
     try { localStorage.setItem('mm-last-email', email); } catch (e) { }
   }
+
+  /* Toggle the password fields between hidden and visible.  It is a view
+     flag: nothing about the value it reveals is stored anywhere. */
+  togglePw() { this.setAuth({ showPw: !this.state.auth.showPw }); }
 
   /* Shared tail of sign-up, sign-in and a fresh load. */
   enterSession(user, db, message) {
@@ -1800,7 +1938,8 @@ class Component extends DCLogic {
       auth: Object.assign({}, this.state.auth, {
         phase: 'ready', userId: user.id, name: user.name || user.email, email: user.email || '',
         colour: MM_USER_COLOURS[Math.abs(String(user.id || '').charCodeAt(0) || 0) % MM_USER_COLOURS.length],
-        busy: false, error: '', tries: 0, until: 0,
+        busy: false, error: '', notice: '', dbDown: false, showPw: false, tries: 0, until: 0,
+        /* The form held a password a moment ago; leave nothing behind. */
         form: { name: '', email: '', password: '', password2: '', samples: false }
       })
     }, function () {
@@ -1875,7 +2014,13 @@ class Component extends DCLogic {
     });
   }
 
-  authError(msg) { this.setAuth({ busy: false, error: msg }); }
+  /* One place to end a failed sign-in or sign-up.  A database outage is not a
+     rejected password, so it gets its own panel rather than a red line that
+     reads as "you typed something wrong". */
+  authError(msg, code) {
+    var down = mmIsDbDown({ code: code });
+    this.setAuth({ busy: false, notice: '', dbDown: down, error: down ? '' : msg });
+  }
   setAuth(patch) {
     this.setState({ auth: Object.assign({}, this.state.auth, patch) });
   }
@@ -2019,6 +2164,105 @@ class Component extends DCLogic {
     if (overdue) bits.push(overdue + ' bill' + (overdue > 1 ? 's' : '') + ' overdue');
     if (bits.length) this.flash(bits.join(' \u00b7 ') + ' \u2014 see the Dashboard.');
     this.armAutoLock();
+    this.offerLocalMigration();
+  }
+
+  /* -----------------------------------------------------------------------
+     Data left in this browser by the local-only version.
+
+     It is never touched without being asked about, and never deleted: the
+     only action offered copies it up, and declining leaves it exactly where
+     it is.  Asked at most once per browser per account — "Keep local data"
+     records the answer so it does not nag, "Skip for now" leaves the flag
+     unset so it comes back next time.  Settings → Account → "Import data
+     left by the older version…" is always there either way.
+     ----------------------------------------------------------------------- */
+  localMigrationKey() {
+    return 'mm-local-migration-' + (this.state.auth.userId || 'unknown');
+  }
+  offerLocalMigration() {
+    var self = this;
+    if (this.state.auth.phase !== 'ready') return;
+    if (this.state.confirm || this.state.dlg) return;        /* never stack dialogs */
+    try { if (localStorage.getItem(this.localMigrationKey())) return; } catch (e) { return; }
+    this.findLocalData(function (doc) {
+      if (!doc) return;
+      /* Something may have opened while we were reading IndexedDB. */
+      if (self.state.confirm || self.state.dlg) return;
+      if (self.state.auth.phase !== 'ready') return;
+      self.setState({
+        dlg: {
+          kind: 'localdata', mode: 'edit',
+          data: {
+            txns: (doc.txns || []).length,
+            accounts: (doc.accounts || []).length,
+            doc: doc
+          }
+        }
+      });
+    });
+  }
+  /* Read the old IndexedDB database without changing it.  Calls back with the
+     fullest unencrypted document found, or null. */
+  findLocalData(done) {
+    if (!window.indexedDB) { done(null); return; }
+    var rq;
+    try { rq = indexedDB.open('money-manager'); }
+    catch (e) { done(null); return; }
+    rq.onerror = function () { done(null); };
+    rq.onsuccess = function (e) {
+      var idb = e.target.result;
+      var close = function () { try { idb.close(); } catch (e2) { } };
+      if (!idb.objectStoreNames.contains('state')) { close(); done(null); return; }
+      var all;
+      try { all = idb.transaction('state', 'readonly').objectStore('state').getAll(); }
+      catch (e3) { close(); done(null); return; }
+      all.onerror = function () { close(); done(null); };
+      all.onsuccess = function () {
+        /* An encrypted local account cannot be read here at all; those are
+           skipped rather than reported as findable data. */
+        var found = (all.result || []).filter(function (r) {
+          return r && !r.__enc && Array.isArray(r.accounts) && Array.isArray(r.txns) &&
+            (r.txns.length || r.accounts.length);
+        });
+        close();
+        if (!found.length) { done(null); return; }
+        /* Someone upgrading has one real database; take the fullest. */
+        found.sort(function (a, b) { return (b.txns || []).length - (a.txns || []).length; });
+        done(found[0]);
+      };
+    };
+  }
+  /* "Upload to my account".  A snapshot of whatever is in the account goes in
+     first, so this is undoable, and the local copy is left untouched.  If the
+     save fails, nothing local has been removed and it can be retried. */
+  migrateLocalData(doc) {
+    var self = this;
+    this.setState({ dlg: null });
+    this.flash('Backing up this account before the upload…');
+    this.snapshot('before uploading data found in this browser').then(function () {
+      var db = self.migrate(mmClone(doc));
+      delete db.__migrated;
+      self.undoStack = [];
+      self.setState({ db: db, sel: [], cursor: -1, recon: null }, function () {
+        self.bumpRev();
+        self.applyTheme();
+        self.saveNow().then(function (saved) {
+          if (!saved) {
+            self.flash('That could not be saved to the server. The data in this browser is untouched — try again.');
+            return;
+          }
+          self.rememberLocalMigration();
+          self.flash('Uploaded ' + db.txns.length + ' transactions to your account. ' +
+            'The copy in this browser was left as it was.');
+        });
+      });
+    }, function () {
+      self.flash('The account could not be backed up first, so nothing was changed.');
+    });
+  }
+  rememberLocalMigration() {
+    try { localStorage.setItem(this.localMigrationKey(), String(Date.now())); } catch (e) { }
   }
 
   /* -----------------------------------------------------------------------
@@ -2234,7 +2478,12 @@ class Component extends DCLogic {
             (r.status === 413 ? 'That was too large for the server to accept.' :
               r.status === 502 || r.status === 504 ? 'The server did not respond in time.' :
                 'The server responded ' + r.status + '.');
-          throw Object.assign(new Error(msg), { status: r.status, body: body });
+          /* body.code is the machine-readable half: it is what tells a caller
+             "the database is down" apart from "your input was rejected",
+             without matching on wording. */
+          throw Object.assign(new Error(msg), {
+            status: r.status, code: body.code || '', body: body
+          });
         }
         return body;
       });
@@ -2259,11 +2508,18 @@ class Component extends DCLogic {
     }).catch(function (e) {
       if (e.status === 401) {
         self.setToken('');
-        self.setAuth({ phase: 'login', busy: false, error: 'Your session has expired — please sign in again.' });
+        self.setAuth({
+          phase: 'login', busy: false, notice: '', dbDown: false,
+          error: 'Your session has expired — please sign in again.'
+        });
         return;
       }
       /* Reachability problems must not look like a rejected password. */
-      self.setAuth({ phase: 'login', busy: false, error: e.message });
+      self.setAuth({
+        phase: 'login', busy: false, notice: '',
+        dbDown: mmIsDbDown(e),
+        error: mmIsDbDown(e) ? '' : e.message
+      });
     });
   }
 
@@ -3674,7 +3930,20 @@ class Component extends DCLogic {
       statusRows: db.txns.length + ' transactions stored',
       statusSel: s.sel.length,
       statusNet: mmInr(this.netWorth()),
-      statusStore: 'Storage: ' + s.store,
+      /* Where the data actually is, right now.
+         This must never read as "saved to the cloud" while a save is failing:
+         the app has no local store to fall back on, so an unsaved edit exists
+         only on screen, and saying otherwise would invite someone to close the
+         tab on it.  saveState is the truth, so it decides the wording. */
+      statusStore: (function () {
+        var st = s.saveState || 'saved';
+        var where = String(s.store || '');
+        if (st === 'error') return '⚠ Not synced — changes are only on this screen';
+        if (st === 'conflict') return '⚠ Not synced — changed on another device';
+        if (st === 'saving' || st === 'pending') return '☁ Saving…';
+        if (/^cloud/.test(where)) return '☁ Cloud connected · ' + where.replace(/^cloud · /, '');
+        return 'Storage: ' + where;
+      })(),
       printSub: mmDmy(s.f.from) + ' ~ ' + mmDmy(s.f.to) + (s.f.acct ? '  ·  ' + this.acctName(s.f.acct) : '  ·  All accounts'),
       printRows: base.slice(0, 2000).map(function (t) {
         return { date: mmDmy(t.date), account: self.acctName(t.accountId), category: self.catName(t.categoryId) || 'Transfer', contents: t.contents, amount: mmInr(t.amount), type: t.type };
@@ -7999,6 +8268,29 @@ class Component extends DCLogic {
         this.btn('Take the other version', function () { self.conflictTakeServer(); }),
         this.btn('Keep mine and replace it', function () { self.conflictKeepMine(); }, 'primary')
       ];
+    } else if (d.kind === 'localdata') {
+      /* Data left in this browser by the local-only version.  Nothing here
+         deletes it: the choices are copy it up, leave it alone, or decide
+         later.  A snapshot of the account is taken before any upload. */
+      title = 'Local financial data found';
+      width = 500;
+      fields.push(this.fld('Transactions', 'static', String(d.data.txns), null, {}));
+      fields.push(this.fld('Accounts', 'static', String(d.data.accounts), null, {}));
+      note = 'This browser still holds data saved by the earlier local-only version of Money Manager. ' +
+        'Uploading it replaces what is currently in this cloud account — a snapshot is taken first, so it can be undone — ' +
+        'and leaves the copy in this browser exactly where it is. Nothing is deleted either way.';
+      buttons = [
+        this.btn('Upload to my account', function () { self.migrateLocalData(d.data.doc); }, 'primary'),
+        this.btn('Keep local data', function () {
+          self.rememberLocalMigration();
+          self.setState({ dlg: null });
+          self.flash('Left as it is. You can still copy it up later from Settings → Account.');
+        }),
+        this.btn('Skip for now', function () {
+          self.setState({ dlg: null });
+          self.flash('Skipped — you will be asked again next time you sign in here.');
+        })
+      ];
     } else if (d.kind === 'delaccount') {
       title = 'Delete this account';
       width = 480;
@@ -8295,6 +8587,22 @@ class Component extends DCLogic {
     var saveColour = (saveState === 'error' || saveState === 'conflict') ? 'var(--c-fde5c4)'
       : (saveState === 'saving' || saveState === 'pending') ? 'var(--c-cfe0f0)' : 'var(--c-cfe0f0)';
 
+    /* One field style, with the border carrying whether that field is wrong,
+       so the panel stays the compact two-column form it already was. */
+    var authFieldStyle = function (h, bad) {
+      return 'height:' + h + 'px;border:1px solid ' + (bad ? 'var(--c-b98a8a)' : 'var(--c-a8c0d8)') +
+        ';padding:0 6px;border-radius:2px;background:' + (bad ? 'var(--c-fdf2f2)' : 'var(--c-surface)') +
+        ';min-width:0';
+    };
+    var pwStrength = mmPasswordStrength(f.password);
+    /* Only complain about what has actually been typed: an untouched field is
+       not yet a mistake.  The button's own check is signupProblem(). */
+    var signupIssue = '';
+    if (phase === 'signup') {
+      if (f.password && mmPasswordProblem(f.password)) signupIssue = mmPasswordProblem(f.password);
+      else if (f.password2 && f.password !== f.password2) signupIssue = 'The two passwords don’t match.';
+    }
+
     return {
       signedIn: phase === 'ready',
       needsAuth: phase === 'login' || phase === 'signup',
@@ -8304,6 +8612,16 @@ class Component extends DCLogic {
       authBusy: !!a.busy,
       authError: a.error || '',
       hasAuthError: !!a.error,
+      authNotice: a.notice || '',
+      hasAuthNotice: !!a.notice && !a.error,
+      /* A database outage gets its own panel with a Retry, because it is not
+         something the person filling the form did wrong or can fix here. */
+      authDbDown: !!a.dbDown,
+      retryAuth: function () { self.retryAuth(); },
+      retryLabel: a.busy ? 'Checking…' : 'Retry',
+      retryBtnStyle: 'height:23px;padding:0 12px;border:1px solid var(--c-1c4470);border-radius:2px;font-weight:600;color:var(--c-onaccent);background:linear-gradient(var(--c-5b8cbf),var(--c-2b5f96));cursor:' +
+        (a.busy ? 'default' : 'pointer') + ';opacity:' + (a.busy ? '.65' : '1'),
+      openAdminHelp: function () { self.openAdminHelp(); },
       authTitle: phase === 'signup' ? 'Create your account' : 'Sign in',
       authSubtitle: phase === 'signup'
         ? 'Your books are kept on the server, so this account opens with the same data on any computer or phone.'
@@ -8316,10 +8634,19 @@ class Component extends DCLogic {
       onAuthPassword: set('password'),
       onAuthKey: function (e) {
         if (e.key !== 'Enter') return;
+        if (a.busy) return;
         if (phase === 'signup') self.doSignup(); else self.doLogin();
       },
       doLogin: function () { self.doLogin(); },
       loginLabel: a.busy ? 'Signing in…' : 'Sign in',
+      primaryBtnStyle: 'width:100%;height:28px;margin-top:10px;border:1px solid var(--c-2f7a44);background:linear-gradient(var(--c-63b878),var(--c-3d8f52));color:var(--c-onaccent);font-weight:600;border-radius:2px;cursor:' +
+        (a.busy ? 'default' : 'pointer') + ';opacity:' + (a.busy ? '.65' : '1'),
+      /* One toggle drives every password field on the panel, so "show" does
+         not have to be pressed twice on the sign-up form. */
+      pwFieldType: a.showPw ? 'text' : 'password',
+      pwToggleLabel: a.showPw ? 'Hide' : 'Show',
+      pwToggleTitle: a.showPw ? 'Hide the password' : 'Show the password',
+      togglePw: function () { self.togglePw(); },
       goSignup: function () { self.signOutToSignup(); },
       goLogin: function () {
         self.setAuth({ phase: 'login', error: '', form: Object.assign({}, f, { password: '' }) });
@@ -8337,7 +8664,32 @@ class Component extends DCLogic {
       onSignupPassword2: set('password2'),
       onSignupSamples: set('samples'),
       doSignup: function () { self.doSignup(); },
-      signupLabel: a.busy ? 'Creating…' : 'Create account',
+      signupLabel: a.busy ? 'Creating account…' : 'Create account',
+      /* Held down while the request is in flight, so a second press cannot
+         start a second registration. */
+      signupBlocked: !!a.busy,
+      signupBtnStyle: 'width:100%;height:28px;border:1px solid var(--c-2f7a44);background:linear-gradient(var(--c-63b878),var(--c-3d8f52));color:var(--c-onaccent);font-weight:600;border-radius:2px;cursor:' +
+        (a.busy ? 'default' : 'pointer') + ';opacity:' + (a.busy ? '.65' : '1'),
+
+      /* Inline field state.  A field only turns red once it has something in
+         it that is wrong — an empty form is not a form full of mistakes. */
+      nameFieldStyle: authFieldStyle(25, false),
+      emailFieldStyle: authFieldStyle(25, !!String(f.email || '').trim() && !mmValidEmail(f.email)),
+      pwFieldStyle: 'flex:1;min-width:0;' + authFieldStyle(25, !!f.password && !!mmPasswordProblem(f.password)),
+      pw2FieldStyle: authFieldStyle(25, !!f.password2 && f.password !== f.password2),
+
+      /* The strength read-out, shown only once something has been typed. */
+      hasPwStrength: !!f.password,
+      pwStrengthLabel: pwStrength.label,
+      pwStrengthStyle: 'font-size:11px;min-width:58px;text-align:right;color:' + pwStrength.colour,
+      pwMeterStyle: 'height:100%;border-radius:2px;transition:width .15s;width:' +
+        (pwStrength.score * 25) + '%;background:' + pwStrength.colour,
+
+      /* What is still missing, but only while the form is being filled in —
+         never as an error before the first keystroke. */
+      signupIssue: signupIssue,
+      hasSignupIssue: !!signupIssue,
+
       samplesNote: 'Adds a few example accounts and transactions so you can look around. Remove them later from Settings → Data.',
       passwordHint: 'At least 8 characters, with a letter and a number.',
       authFootnote: 'Your data is stored on the server this app is served from — nothing financial is kept in this browser. ' +

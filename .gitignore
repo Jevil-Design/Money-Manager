@@ -1,0 +1,19 @@
+# Secrets. .env.example is the committed template; the real values never are.
+.env
+.env.*
+!.env.example
+
+# Installed dependencies — package.json is the record of what is needed.
+node_modules/
+
+# Build and platform caches
+.vercel/
+.next/
+
+# Local attachment uploads from the self-hosted server
+uploads/
+
+# Editor and OS noise
+.DS_Store
+Thumbs.db
+*.swp
