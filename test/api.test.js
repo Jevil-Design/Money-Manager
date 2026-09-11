@@ -186,6 +186,98 @@ function freshHandler(env) {
   }
 
   /* ---------------------------------------------------------------------
+     4b. The allowlist must not become a way to enumerate accounts.
+         Checked with a stubbed database so it needs no real one.
+     --------------------------------------------------------------------- */
+  console.log('\nA refused signup reveals nothing about who has an account');
+  {
+    const Module = require('module');
+    const origLoad = Module._load;
+    let sawPasswordHash = false;
+    class FakeClient {
+      async query(sql) {
+        const s = String(sql).replace(/\s+/g, ' ');
+        if (/SELECT id FROM mm_user WHERE lower\(email\)/.test(s)) {
+          /* Pretend every address already has an account here. If existence
+             were tested before the allowlist, a refused caller would get 409
+             and learn that — which is the leak. */
+          return { rows: [{ id: 'u1' }], rowCount: 1 };
+        }
+        if (/UPDATE mm_user SET salt = \$1, pw_hash/.test(s)) sawPasswordHash = true;
+        if (/INSERT INTO mm_user/.test(s)) sawPasswordHash = true;
+        if (/COUNT\(\*\)::int AS n FROM mm_user/.test(s)) return { rows: [{ n: 1 }], rowCount: 1 };
+        return { rows: [], rowCount: 0 };
+      }
+      release() {}
+    }
+    class FakePool {
+      on() { return this; }
+      async connect() { return new FakeClient(); }
+      async end() {}
+    }
+    Module._load = function (request) {
+      if (request === 'pg') return { Pool: FakePool, Client: FakeClient };
+      return origLoad.apply(this, arguments);
+    };
+
+    const handler = freshHandler({
+      VERCEL_ENV: 'production',
+      DATABASE_URL: 'postgres://u:pw@db.example.org:5432/mm?sslmode=require',
+      ALLOWED_EMAILS: 'allowed@example.com'
+    });
+    const server = await startServer(handler);
+    const port = server.address().port;
+
+    const outsider = await call(port, 'POST', '/api/v1/auth/register', {
+      name: 'Outsider', email: 'stranger@example.com',
+      password: 'abcdefg1', password2: 'abcdefg1'
+    });
+    ok('an address not on the allowlist is refused with 403',
+      outsider.status === 403, 'HTTP ' + outsider.status + ' ' + outsider.raw.slice(0, 120));
+    ok('NOT 409 — it must not admit the address is already registered',
+      outsider.status !== 409, String(outsider.status));
+    ok('the code is not_allowed', outsider.body && outsider.body.code === 'not_allowed',
+      outsider.body && outsider.body.code);
+    ok('the message does not echo the address back',
+      outsider.raw.indexOf('stranger@example.com') < 0, outsider.raw.slice(0, 160));
+    ok('it names no environment variable',
+      !/ALLOWED_EMAILS|DATABASE_URL|RESEND/i.test(outsider.raw), outsider.raw.slice(0, 160));
+    ok('it does not say whether that address has an account',
+      !/already exists|exists|registered/i.test(outsider.body.error), outsider.body.error);
+    ok('a refused caller never reaches the password hash', sawPasswordHash === false);
+
+    /* Every refused address must look identical — otherwise the differences
+       are themselves the answer. */
+    const other = await call(port, 'POST', '/api/v1/auth/register', {
+      name: 'Other', email: 'someone.else@example.com',
+      password: 'abcdefg1', password2: 'abcdefg1'
+    });
+    ok('two different refused addresses get byte-identical replies',
+      other.status === outsider.status && other.raw === outsider.raw,
+      other.status + ' ' + other.raw.slice(0, 80));
+
+    /* An address that IS allowed still gets the useful answer. */
+    const insider = await call(port, 'POST', '/api/v1/auth/register', {
+      name: 'Allowed', email: 'allowed@example.com',
+      password: 'abcdefg1', password2: 'abcdefg1'
+    });
+    ok('an allowed address that already exists is told to sign in',
+      insider.status === 409 && insider.body.code === 'email_taken',
+      'HTTP ' + insider.status + ' ' + insider.raw.slice(0, 120));
+
+    /* Case and padding must not sneak past the allowlist. */
+    const cased = await call(port, 'POST', '/api/v1/auth/register', {
+      name: 'Allowed', email: '  ALLOWED@Example.COM  ',
+      password: 'abcdefg1', password2: 'abcdefg1'
+    });
+    ok('the allowlist is case- and whitespace-insensitive',
+      cased.status === 409, 'HTTP ' + cased.status);
+
+    server.close();
+    Module._load = origLoad;
+  }
+
+  /* ---------------------------------------------------------------------
      5. Routing and method handling, independent of the database.
      --------------------------------------------------------------------- */
   console.log('\nRouting');

@@ -1364,9 +1364,12 @@ async function authGoogle(client, req, res) {
   const email = normEmail(info.email);
   const { rows } = await query(client, 'SELECT id FROM mm_user WHERE lower(email) = $1', [email]);
   if (!rows.length && !(await claimAccount(client, email))) {
+    /* Same wording as the password route, and for the same reason: it names
+       no address and no variable. Google has already proved who they are, so
+       there is no enumeration risk here — only a reason to be consistent. */
     return send(res, 403, {
-      error: 'This server is not open to ' + email +
-        '. The administrator can allow the address on the deployment.',
+      error: 'This deployment is not open for new accounts. ' +
+        'If you should have access, ask whoever runs it to add you.',
       code: 'not_allowed'
     });
   }
@@ -1677,18 +1680,32 @@ async function handleRequest(req, res) {
           return send(res, 422, { error: 'The two passwords don’t match.', code: 'password_mismatch' });
         }
 
+        /* Whether the address is ALLOWED is settled before whether it already
+           has an account, and that order is the point.
+           The other way round, someone who cannot register here could still
+           tell "that address has an account" (409) from "you are not allowed"
+           (403), for any address they cared to try — which on a personal
+           finance deployment is a list of who banks here. Now anyone not on
+           the allowlist gets the same 403 whatever they type, and learns
+           nothing about any account.
+           It is also the cheap check: a refused caller never reaches the
+           password hash, so hammering this endpoint costs almost nothing. */
+        if (!(await claimAccount(client, email))) {
+          /* Deliberately says nothing about this address, no environment
+             variable, and does not echo back what was typed. Enough for
+             someone who should have access to know what to ask for. */
+          return send(res, 403, {
+            error: 'This deployment is not open for new accounts. ' +
+              'If you should have access, ask whoever runs it to add you.',
+            code: 'not_allowed'
+          });
+        }
+
         const existing = await query(client, 'SELECT id FROM mm_user WHERE lower(email) = $1', [email]);
         if (existing.rows.length) {
           return send(res, 409, {
             error: 'An account with this email already exists. Sign in instead.',
             code: 'email_taken'
-          });
-        }
-        if (!(await claimAccount(client, email))) {
-          return send(res, 403, {
-            error: 'This server is not accepting new accounts. The administrator can allow ' +
-              email + ' by adding it to the deployment’s allowed addresses.',
-            code: 'not_allowed'
           });
         }
 
