@@ -213,6 +213,12 @@ leaks a credential, and that the sample data obeys the accounting rules
 (income raises, expense lowers, a transfer is neither, a card purchase grows
 the outstanding, a card payment shrinks it without a second expense).
 
+`test/pool.test.js` and `test/cookie.test.js` stub the Postgres driver, so they
+need no database either. The first covers connection reuse and every way a
+pooled connection can die on a serverless runtime; the second pins the session
+cookie's attributes and proves it genuinely authenticates rather than being set
+and ignored.
+
 `test/api.test.js` serves `api/index.js` over real HTTP through the same
 rewrite Vercel applies. Without a database it exercises every
 database-unavailable path and asserts that nothing sensitive reaches the
@@ -222,6 +228,18 @@ and then deletes its own accounts:
 ```
 MM_TEST_DATABASE_URL=postgres://... npm run test:api
 ```
+
+`test/verify-deployment.js` checks a **live** deployment and tells you, in
+plain terms, which step is still missing:
+
+```
+npm run verify https://your-project.vercel.app
+npm run verify https://your-project.vercel.app -- --full
+```
+
+Read-only by default. `--full` additionally creates two throwaway accounts,
+writes and re-reads a transaction, confirms a second session sees it and a
+second user does not, then deletes both accounts.
 
 ## Security notes
 
@@ -234,6 +252,56 @@ MM_TEST_DATABASE_URL=postgres://... npm run test:api
 - **Session tokens** are 256-bit random, stored only as a digest (HMAC-keyed
   when `AUTH_SECRET` is set), expire after 30 days, and slide forward while in
   use.
+- **The session is also issued as a cookie** — `HttpOnly` (script on the page
+  cannot read it, so an XSS bug cannot walk off with a 30-day session),
+  `Secure` (never sent over plain http; relaxed only for localhost, where
+  there is no https to use), `SameSite=Lax` (the browser will not attach it to
+  a cross-site POST/PUT/DELETE, which is what prevents another site acting as
+  the signed-in user), `Path=/`, and `Max-Age` matching the server-side
+  expiry. It is cleared on sign-out, on "sign out everywhere", and on account
+  deletion. The token is still returned in the JSON body too, because that is
+  what the app sends today and what a different-origin deployment needs — an
+  `Authorization` header takes precedence over the cookie.
+
+## How the database connection is handled
+
+One `pg.Pool` at module scope, reused by every request that lands on the same
+warm container. Connecting costs a TCP round trip plus a TLS handshake plus
+authentication, so paying it per request is both slow and a good way to exhaust
+a provider's connection limit.
+
+- `max: 1` — a serverless container serves one request at a time, so one
+  connection per container is all that can ever be in use. More would multiply
+  idle connections across containers and hit the provider's ceiling sooner.
+- `idleTimeoutMillis: 30000` — long enough to be reused across a burst, short
+  enough that an abandoned container lets its connection go.
+- `allowExitOnIdle` — the runtime can freeze or exit without an open handle
+  holding it up.
+- An `error` listener is attached. A pool without one turns a dropped idle
+  socket into an unhandled exception, which on Vercel is an opaque crashed
+  invocation with no message.
+
+The awkward part of serverless, which `max: 1` does not solve on its own: the
+container is **frozen** between requests, and while it is frozen the database
+(or a PgBouncer in front of it, or a NAT idle timer) can drop the socket.
+node-postgres hands back an idle client without checking it, so the first query
+on a resumed container can fail on a connection that looks fine. So:
+
+- a checked-out client is validated with `SELECT 1`, and a dead one is
+  destroyed and replaced — up to three attempts, which also covers a
+  serverless database that was asleep and needs a moment;
+- any query failing at the connection level marks that client dead even if the
+  caller catches the error and carries on, because `/health` deliberately
+  swallows a failed encoding lookup and other writes use `.catch(() => {})`.
+  Without that, a socket that died mid-request would be returned to the pool
+  and handed to the *next* request, which would fail for no visible reason;
+- a query error (bad SQL, a constraint) is **not** treated as a broken
+  connection, or the pool would churn on every ordinary failure;
+- if the connection string changes under a warm container — a redeploy onto a
+  different database, or a rotated password — the old pool is shut down and a
+  new one built.
+
+`test/pool.test.js` stubs the driver and asserts every one of these.
 - **Every query is parameterised.** No user input is ever concatenated into
   SQL.
 - **Every financial row is scoped to the authenticated user**, whose identity

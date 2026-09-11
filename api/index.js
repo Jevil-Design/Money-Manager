@@ -90,11 +90,11 @@ const zlib = require('zlib');
    throws while the module is being imported becomes an opaque
    FUNCTION_INVOCATION_FAILED page with no usable message, so the one dependency
    that could be missing is resolved lazily and reported as readable JSON. */
-let pgClient = null;
-function getClientClass() {
-  if (pgClient) return pgClient;
+let pgPoolClass = null;
+function getPoolClass() {
+  if (pgPoolClass) return pgPoolClass;
   try {
-    pgClient = require('pg').Client;
+    pgPoolClass = require('pg').Pool;
   } catch (err) {
     /* The user gets the same sentence as any other database outage; the
        actionable version goes to the function log. */
@@ -103,7 +103,7 @@ function getClientClass() {
     throw appError(503, 'db_driver_missing', DB_UNAVAILABLE_MESSAGE,
       'The "pg" package is not installed in this deployment.');
   }
-  return pgClient;
+  return pgPoolClass;
 }
 
 const KEEP_SNAPSHOTS = Math.max(1, parseInt(process.env.KEEP_SNAPSHOTS || '40', 10));
@@ -206,15 +206,76 @@ function configProblem(url) {
   return '';
 }
 
-/* One short-lived client per invocation.  Serverless containers are frozen
-   between requests, so a long-lived pool would hold sockets the database has
-   already dropped; connecting per request is the reliable pattern. */
-/* Open one connection, or fail with a message a browser may see.
-   Three distinct situations, three distinct codes, one wording for the user:
+/* Three distinct situations, three distinct codes, one wording for the user:
      no_database      nothing is configured at all
      db_misconfigured the value present is not a usable Postgres URL
      db_unreachable   the database refused the connection or timed out */
-async function openClient() {
+/* Connection reuse on a serverless runtime.
+ *
+ * The pool lives at module scope, so it outlives a single invocation and is
+ * reused by every later request that lands on the same warm container — which
+ * is the whole point: connecting to Postgres costs a TCP round trip plus a TLS
+ * handshake plus authentication, and paying that on every request is both slow
+ * and a good way to exhaust a provider's connection limit.
+ *
+ *   max: 1        A serverless container serves one request at a time, so one
+ *                 connection per container is all that can ever be in use.
+ *                 More would just multiply idle connections across containers
+ *                 and hit the provider's ceiling sooner.
+ *   idleTimeout   Long enough to be reused across a burst of requests, short
+ *                 enough that an abandoned container lets its connection go.
+ *   allowExitOnIdle  Lets the runtime freeze or exit without an open handle
+ *                 holding it up.
+ *
+ * The awkward part of serverless, which max:1 does not solve on its own: the
+ * container is FROZEN between requests, and while it is frozen the database
+ * (or a PgBouncer in front of it, or a NAT idle timer) can drop the socket.
+ * node-postgres hands back an idle client without checking it, so the first
+ * query on a resumed container can fail on a connection that looks fine.
+ * acquire() therefore validates a client with a cheap SELECT 1 and discards
+ * a dead one, which is what makes reuse safe rather than merely faster.
+ */
+let pool = null;
+let poolUrl = '';
+
+function getPool(url) {
+  if (pool && poolUrl === url) return pool;
+  /* The connection string changed under us — a redeploy with a new database,
+     or a rotated password. Drop the old pool rather than keep using it. */
+  if (pool) {
+    const stale = pool;
+    pool = null;
+    poolUrl = '';
+    stale.end().catch(() => { /* nothing useful to do about a stale pool */ });
+  }
+  const Pool = getPoolClass();
+  const local = /@(localhost|127\.0\.0\.1)[:/]/.test(url);
+  pool = new Pool({
+    connectionString: url,
+    /* Providers require TLS; certificates are verified unless the operator
+       has said their provider uses one Node does not trust. */
+    ssl: local ? false : { rejectUnauthorized: process.env.PGSSL_NO_VERIFY !== '1' },
+    max: 1,
+    idleTimeoutMillis: 30000,
+    connectionTimeoutMillis: 12000,
+    query_timeout: 20000,
+    allowExitOnIdle: true,
+    application_name: 'money-manager'
+  });
+  poolUrl = url;
+  /* A pool with no 'error' listener turns a dropped idle socket into an
+     unhandled exception, which on Vercel is an opaque crashed invocation.
+     The pool has already discarded the client by the time this fires; there
+     is nothing to do but record it. */
+  pool.on('error', (err) => {
+    console.error('money-manager db: idle connection dropped — ' + scrub(err && err.message));
+  });
+  return pool;
+}
+
+/* Check the configured connection string before anything tries to use it, so
+   a missing or malformed value is reported as such rather than as a timeout. */
+function requireUrl() {
   const url = connectionString();
   if (!url) {
     console.error('money-manager db: ' + noDatabaseDetail());
@@ -225,43 +286,103 @@ async function openClient() {
     console.error('money-manager db: ' + bad);
     throw appError(503, 'db_misconfigured', DB_UNAVAILABLE_MESSAGE, bad);
   }
-  const Client = getClientClass();
-  const local = /@(localhost|127\.0\.0\.1)[:/]/.test(url);
-  const opts = {
-    connectionString: url,
-    ssl: local ? false : { rejectUnauthorized: process.env.PGSSL_NO_VERIFY !== '1' },
-    connectionTimeoutMillis: 12000,
-    query_timeout: 20000,
-    application_name: 'money-manager'
-  };
+  return url;
+}
 
-  /* Serverless Postgres suspends when idle, and the first connection after
-     that can take longer than a cold client is willing to wait.  One retry
-     turns "database unavailable" into a slightly slow first request. */
+/* Take a working connection out of the pool, or fail with a safe error.
+   Retries cover the two normal serverless cases: a client that went stale
+   while the container was frozen, and a provider that was asleep and needs a
+   moment to accept the first connection. */
+async function acquire() {
+  const url = requireUrl();
+  const p = getPool(url);
   let lastErr = null;
-  for (let attempt = 0; attempt < 2; attempt++) {
-    const client = new Client(opts);
+
+  for (let attempt = 0; attempt < 3; attempt++) {
+    let client;
     try {
-      await client.connect();
-      return client;
+      client = await p.connect();
     } catch (err) {
       lastErr = err;
-      try { await client.end(); } catch (e) { /* it never connected */ }
+      continue;                       /* could not get one; try again */
+    }
+    try {
+      await client.query('SELECT 1');
+      return watchForBreakage(client);
+    } catch (err) {
+      lastErr = err;
+      /* release(err) destroys the client instead of returning it to the
+         pool, so the next attempt gets a genuinely new connection. */
+      try { client.release(err); } catch (e) { /* already gone */ }
     }
   }
+
   const why = scrub(lastErr && lastErr.message);
   console.error('money-manager db: connection failed — ' + why);
   throw appError(503, 'db_unreachable', DB_UNAVAILABLE_MESSAGE, why);
 }
 
+/* Mark a client dead the moment any query on it fails at the connection
+   level — even if the caller catches that error and carries on.
+ *
+ * This is not belt-and-braces. /health deliberately swallows a failed
+ * encoding lookup because the connection is what it is really reporting on,
+ * and other call sites use .catch(() => {}) on writes that do not matter.
+ * Without this, a socket that died mid-request would be swallowed along with
+ * the error, returned to the pool, and handed to the NEXT request, which
+ * would fail for no visible reason. Wrapping query() means the verdict does
+ * not depend on who happens to catch what.
+ */
+function watchForBreakage(client) {
+  const rawQuery = client.query.bind(client);
+  client.query = function () {
+    let out;
+    try {
+      out = rawQuery.apply(null, arguments);
+    } catch (err) {
+      if (isConnectionError(err)) client.__mmBroken = true;
+      throw err;
+    }
+    /* The callback form returns undefined; only a promise needs chaining. */
+    if (out && typeof out.then === 'function') {
+      return out.then(null, (err) => {
+        if (isConnectionError(err)) client.__mmBroken = true;
+        throw err;
+      });
+    }
+    return out;
+  };
+  return client;
+}
+
 async function withDb(fn) {
-  const client = await openClient();
+  const client = await acquire();
+  let broken = null;
   try {
     await ensureSchema(client);
     return await fn(client);
+  } catch (err) {
+    /* If the failure was the connection itself, this client must not go back
+       into the pool for the next request to trip over. */
+    if (isConnectionError(err)) broken = err;
+    throw err;
   } finally {
-    try { await client.end(); } catch (e) { /* the socket is going away anyway */ }
+    /* Back to the pool for the next invocation on this container — the
+       connection is deliberately NOT closed.  Unless it broke, in which case
+       release(err) destroys it and the pool opens a fresh one on demand. */
+    const discard = broken ||
+      (client.__mmBroken ? new Error('the connection was lost during this request') : undefined);
+    try { client.release(discard); } catch (e) { /* already gone */ }
   }
+}
+
+/* Is this error the connection dying, rather than the query being wrong?
+   Only these justify throwing the connection away. */
+function isConnectionError(err) {
+  if (!err) return false;
+  if (/^(08|57P0)/.test(String(err.code || ''))) return true;   /* connection_exception, admin shutdown */
+  return /ECONNRESET|EPIPE|ETIMEDOUT|ECONNREFUSED|Connection terminated|socket hang up|server closed the connection/i
+    .test(String(err.message || ''));
 }
 
 const SCHEMA = `
@@ -626,10 +747,100 @@ function tokenDigest(token) {
 function tokenDigests(token) {
   return AUTH_SECRET ? [tokenDigest(token), sha(token)] : [sha(token)];
 }
-/* The token this request presented, from either accepted header. */
+/* The token this request presented.
+ *
+ * Three transports, in order of precedence:
+ *   Authorization: Bearer   what the app sends today, and the only thing that
+ *                           can work when the app is served from a different
+ *                           origin than the API (a cookie would not be sent)
+ *   X-Api-Token             the original long-lived API token header
+ *   mm_session cookie       HttpOnly, so script on the page cannot read it —
+ *                           see SESSION_COOKIE below
+ */
 function bearerToken(req) {
   const header = req.headers.authorization || '';
-  return (header.replace(/^Bearer\s+/i, '').trim() || req.headers['x-api-token'] || '').trim();
+  const fromHeader = (header.replace(/^Bearer\s+/i, '').trim() || req.headers['x-api-token'] || '').trim();
+  if (fromHeader) return fromHeader;
+  return readCookie(req, SESSION_COOKIE);
+}
+
+/* ------------------------------------------------------------ session cookie
+
+   The session token is also issued as a cookie, with the attributes that
+   matter:
+
+     HttpOnly   script on the page cannot read it, so a cross-site scripting
+                bug cannot walk off with a 30-day session
+     Secure     it is never sent over plain http (relaxed only for localhost,
+                where there is no https to use)
+     SameSite=Lax
+                the browser does not attach it to a cross-site POST/PUT/DELETE,
+                which is what stops another site from acting as the signed-in
+                user. Lax rather than Strict so that arriving from an external
+                link still opens a signed-in app.
+     Path=/     one cookie for the page and the API alike
+     Max-Age    matches the 30-day server-side expiry of the session row
+
+   The token is still returned in the JSON body as well, because that is what
+   the app uses today and what a different-origin deployment needs. Nothing
+   depends on the cookie yet: it is read when no header is present, so the
+   transport can be switched over in the app on its own, and verified, without
+   a flag day.
+*/
+const SESSION_COOKIE = 'mm_session';
+const SESSION_DAYS = 30;
+
+function readCookie(req, name) {
+  const raw = req.headers.cookie;
+  if (!raw) return '';
+  /* Split on ';' and match the name exactly — a cookie called
+     'not_mm_session' must not satisfy a lookup for 'mm_session'. */
+  const parts = String(raw).split(';');
+  for (let i = 0; i < parts.length; i++) {
+    const eq = parts[i].indexOf('=');
+    if (eq < 0) continue;
+    if (parts[i].slice(0, eq).trim() !== name) continue;
+    const value = parts[i].slice(eq + 1).trim();
+    try { return decodeURIComponent(value); } catch (e) { return value; }
+  }
+  return '';
+}
+
+/* Is this request reaching us over a connection a Secure cookie can use?
+   On Vercel everything is https and x-forwarded-proto says so; a local
+   http server is the only case where Secure has to be dropped, or the
+   browser would discard the cookie and local development could not sign in. */
+function isSecureRequest(req) {
+  const proto = String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim().toLowerCase();
+  if (proto) return proto === 'https';
+  if (req.socket && req.socket.encrypted) return true;
+  const host = String(req.headers.host || '');
+  return !/^(localhost|127\.0\.0\.1|\[::1\])(:|$)/.test(host);
+}
+
+function cookieAttributes(req) {
+  const bits = ['Path=/', 'HttpOnly', 'SameSite=Lax'];
+  if (isSecureRequest(req)) bits.push('Secure');
+  return bits;
+}
+
+/* Queue a Set-Cookie alongside whatever else this response is sending. */
+function addHeader(res, name, value) {
+  const existing = res.getHeader(name);
+  if (!existing) { res.setHeader(name, value); return; }
+  res.setHeader(name, (Array.isArray(existing) ? existing : [existing]).concat(value));
+}
+
+function setSessionCookie(res, req, token) {
+  addHeader(res, 'Set-Cookie', SESSION_COOKIE + '=' + encodeURIComponent(token) + '; ' +
+    cookieAttributes(req).concat('Max-Age=' + (SESSION_DAYS * 24 * 3600)).join('; '));
+}
+
+/* Ending a session must also remove the cookie, or the browser keeps
+   presenting a token the server has already deleted. */
+function clearSessionCookie(res, req) {
+  addHeader(res, 'Set-Cookie', SESSION_COOKIE + '=; ' +
+    cookieAttributes(req).concat('Max-Age=0', 'Expires=Thu, 01 Jan 1970 00:00:00 GMT').join('; '));
 }
 
 /* Issue a session token.  The caller gets the only copy; we keep its digest. */
@@ -987,6 +1198,7 @@ async function authGoogle(client, req, res) {
     }
     var sessionToken = await issueSession(client, userId, req.headers['x-device']);
     await query(client, 'COMMIT', []);
+    setSessionCookie(res, req, sessionToken);
     send(res, 200, { token: sessionToken, email: email, name: info.name || '', expiresIn: null });
   } catch (err) {
     await query(client, 'ROLLBACK', []).catch(() => {});
@@ -1319,6 +1531,7 @@ async function handleRequest(req, res) {
           throw err;
         }
         const u = await query(client, 'SELECT * FROM mm_user WHERE id = $1', [id]);
+        setSessionCookie(res, req, token);
         return send(res, 200, {
           token: token,
           user: publicUser(u.rows[0]),
@@ -1373,6 +1586,7 @@ async function handleRequest(req, res) {
         }
         await clearFailures(client, user.id);
         const token = await issueSession(client, user.id, req.headers['x-device']);
+        setSessionCookie(res, req, token);
         return send(res, 200, { token: token, user: publicUser(user) });
       }
 
@@ -1393,11 +1607,14 @@ async function handleRequest(req, res) {
            else's session. */
         await query(client, 'DELETE FROM mm_token WHERE user_id = $1 AND id = ANY($2)',
           [user.id, tokenDigests(bearerToken(req))]);
+        clearSessionCookie(res, req);
         return send(res, 200, { ok: true });
       }
-      /* Signing out everywhere is the remedy if a device is lost. */
+      /* Signing out everywhere is the remedy if a device is lost.  That
+         includes this device, so its cookie goes too. */
       if (route === 'auth/logout-all' && method === 'POST') {
         await query(client, 'DELETE FROM mm_token WHERE user_id = $1', [user.id]);
+        clearSessionCookie(res, req);
         return send(res, 200, { ok: true });
       }
       if (route === 'auth/password' && method === 'POST') {
@@ -1427,6 +1644,7 @@ async function handleRequest(req, res) {
         }
         /* Every dependent row cascades from mm_user. */
         await query(client, 'DELETE FROM mm_user WHERE id = $1', [user.id]);
+        clearSessionCookie(res, req);
         return send(res, 200, { deleted: true });
       }
 
