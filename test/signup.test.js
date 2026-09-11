@@ -361,6 +361,61 @@ const from = (ip) => ({ 'x-vercel-forwarded-for': ip });
     server.close();
   }
 
+  /* ----------------------------------------------------------------- 9b */
+  console.log('\nA rotating IPv6 address does not reset the limit');
+  {
+    /* Measured on the real deployment: the caller's address changed between
+       two requests three seconds apart, so three accounts became four.
+       Privacy extensions rotate the low half of an IPv6 address, which is
+       why the /64 is the unit and the full address is not. */
+    const src = require('fs').readFileSync(API, 'utf8');
+    const { ipKey } = new Function('require', 'module', 'exports', '__filename', '__dirname',
+      src + '\n;return { ipKey };')(require, { exports: {} }, {}, API, path.dirname(API));
+
+    ok('two addresses in the same /64 are one caller',
+      ipKey('2001:db8:abcd:1234:1111:2222:3333:4444') ===
+      ipKey('2001:db8:abcd:1234:9999:8888:7777:6666'),
+      ipKey('2001:db8:abcd:1234:1111:2222:3333:4444'));
+    ok('a different /64 is a different caller',
+      ipKey('2001:db8:abcd:1234::1') !== ipKey('2001:db8:abcd:9999::1'));
+    ok('shorthand and expanded forms agree',
+      ipKey('2001:db8:abcd:1234::1') === ipKey('2001:0db8:abcd:1234:0000:0000:0000:0001'),
+      ipKey('2001:db8:abcd:1234::1') + ' vs ' + ipKey('2001:0db8:abcd:1234:0000:0000:0000:0001'));
+    ok('leading zeros do not split a caller in two',
+      ipKey('2001:0db8:0000:0001::5') === ipKey('2001:db8:0:1::5'));
+    ok('IPv4 is used whole, not narrowed to a /24',
+      ipKey('203.0.113.7') === '203.0.113.7' && ipKey('203.0.113.8') !== ipKey('203.0.113.7'));
+    ok('an IPv4-mapped IPv6 address is treated as the IPv4 it is',
+      ipKey('::ffff:203.0.113.7') === '203.0.113.7', ipKey('::ffff:203.0.113.7'));
+    ok('an empty address is empty, not a shared bucket', ipKey('') === '' && ipKey(null) === '');
+    ok('a bracketed address is unwrapped',
+      ipKey('[2001:db8:abcd:1234::1]') === ipKey('2001:db8:abcd:1234::1'));
+    ok('nonsense is passed through rather than crashing',
+      typeof ipKey('not-an-address') === 'string');
+
+    /* And end to end: a rotating low half must not buy more accounts. */
+    const db = makeDb([]);
+    const server = await startServer(loadApi(db.module,
+      { DATABASE_URL: DB, VERCEL_ENV: 'production', ALLOW_SIGNUPS: 'open' }));
+    const port = server.address().port;
+    const seen = [];
+    for (let i = 0; i < 5; i++) {
+      /* Same /64, a new interface identifier each time — exactly what
+         privacy extensions do. */
+      seen.push((await call(port, 'POST', '/api/v1/auth/register', reg(),
+        from('2001:db8:1111:2222:aaaa:bbbb:cccc:' + (1000 + i)))).status);
+    }
+    ok('a rotating address within one /64 still stops at the limit',
+      seen.filter((s) => s === 200).length === 3, seen.join(','));
+    ok('and the rest are throttled', seen.filter((s) => s === 429).length === 2, seen.join(','));
+
+    /* A genuinely different customer is still unaffected. */
+    const elsewhere = await call(port, 'POST', '/api/v1/auth/register', reg(),
+      from('2001:db8:3333:4444::1'));
+    ok('a different /64 is still allowed', elsewhere.status === 200, String(elsewhere.status));
+    server.close();
+  }
+
   /* ----------------------------------------------------------------- 10 */
   console.log('\nEvery account is still its own');
   {

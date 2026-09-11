@@ -1035,12 +1035,54 @@ function clientIp(req) {
     (req.socket && req.socket.remoteAddress) || '';
 }
 
+/* Expand an IPv6 address to its eight groups, or null if it is not one. */
+function expandIpv6(s) {
+  const halves = s.split('::');
+  if (halves.length > 2) return null;
+  const head = halves[0] ? halves[0].split(':') : [];
+  const tail = halves.length === 2 && halves[1] ? halves[1].split(':') : [];
+  let groups;
+  if (halves.length === 1) {
+    if (head.length !== 8) return null;
+    groups = head;
+  } else {
+    const fill = 8 - head.length - tail.length;
+    if (fill < 0) return null;
+    groups = head.concat(new Array(fill).fill('0'), tail);
+  }
+  /* Strip leading zeros so 2001:0db8 and 2001:db8 bucket together. */
+  return groups.map((g) => (g.replace(/^0+/, '') || '0'));
+}
+
+/* What counts as "the same caller".
+ *
+ * Not simply the address. IPv6 privacy extensions rotate the low half of the
+ * address continuously — measured on this deployment, an address changed
+ * between two requests three seconds apart — so counting per address hands
+ * out a fresh allowance every few seconds and the limit does nothing.
+ *
+ * The /64 is the prefix a customer is actually assigned, so that is the unit.
+ * IPv4 is used whole: a /24 would lump unrelated customers together and lock
+ * out an office because of one person.
+ */
+function ipKey(ip) {
+  const s = String(ip == null ? '' : ip).trim().toLowerCase()
+    .replace(/^\[/, '').replace(/\]$/, '');
+  if (!s) return '';
+  /* An IPv4 address arriving in IPv6-mapped form. */
+  const mapped = s.match(/^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/);
+  if (mapped) return mapped[1];
+  if (s.indexOf(':') < 0) return s;                  /* plain IPv4 */
+  const groups = expandIpv6(s);
+  return groups ? groups.slice(0, 4).join(':') + '::/64' : s;
+}
+
 function rateBucket(prefix, req) {
-  const ip = clientIp(req);
-  if (!ip) return prefix + ':unknown';
-  const key = crypto.createHmac('sha256', AUTH_SECRET || 'mm-rate-limit')
-    .update(ip).digest('hex').slice(0, 32);
-  return prefix + ':' + key;
+  const key = ipKey(clientIp(req));
+  if (!key) return prefix + ':unknown';
+  const digest = crypto.createHmac('sha256', AUTH_SECRET || 'mm-rate-limit')
+    .update(key).digest('hex').slice(0, 32);
+  return prefix + ':' + digest;
 }
 
 async function rateHits(client, bucket, minutes) {
