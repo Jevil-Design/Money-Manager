@@ -30,3 +30,7 @@ skills-lock.json
 
 # Skill documentation for coding agents — not part of the running app.
 .claude/
+
+# Vercel installs dependencies itself from package.json; uploading the local
+# tree would only make every deploy slower.
+node_modules/
