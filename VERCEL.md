@@ -67,16 +67,82 @@ rewrites anything. `mm_meta.schema_version` records what has been applied, and
 
 ## 2. Decide who may sign up
 
-The site is on the public internet, so set this before you share the URL:
+The site is on the public internet, so decide this before you share the URL.
+`ALLOW_SIGNUPS` is the switch, and it has three states:
+
+```
+ALLOW_SIGNUPS = open        anyone may create an account
+ALLOW_SIGNUPS = closed      nobody may
+ALLOW_SIGNUPS = allowlist   only ALLOWED_EMAILS   (the default)
+```
+
+With `allowlist` (or nothing at all):
 
 ```
 ALLOWED_EMAILS = you@gmail.com, partner@gmail.com
 ```
 
 Everyone listed can create their own account, each with completely separate
-books. **If you leave it unset, the first account to register claims the
-deployment and everyone after is refused** — safe for one person, but setting
-it explicitly is better, because it survives clearing the database.
+books. With `ALLOWED_EMAILS` unset too, the first account to register claims
+the deployment and everyone after is refused.
+
+> **Clearing `ALLOWED_EMAILS` does not open registration — it closes it.**
+> Once an account exists, the "first account claims this deployment" fallback
+> refuses everybody, which is the opposite of what anyone reaching for it
+> wants. Use `ALLOW_SIGNUPS=open` instead.
+
+`closed` is worth knowing about: once your own accounts exist, it is the
+setting that stops anyone else ever creating one, without you having to
+maintain a list.
+
+### Limits, when signups are open
+
+A public URL with open registration is an invitation to fill the database, so
+open mode comes with limits rather than without. Three buckets, because they
+stop different things:
+
+| Variable | Default | Stops |
+|---|---|---|
+| `SIGNUP_LIMIT_TRIES` | 10/hour per caller | hammering the endpoint. Generous, so a typo or a taken address does not lock a real person out |
+| `SIGNUP_LIMIT_IP_HOUR` | 3/hour per caller | one person farming accounts |
+| `SIGNUP_LIMIT_IP_DAY` | 5/day per caller | the same, over a longer window |
+| `SIGNUP_LIMIT_HOUR` | 30/hour, whole deployment | abuse spread across many addresses, which per-caller limits cannot see |
+| `MAX_ACCOUNTS` | 0 (no ceiling) | a hard cap on total accounts |
+
+A throttled caller gets a `429` that reads as temporary and names no limit,
+variable or address. Validation runs first, so a weak password or a malformed
+address costs nothing and uses up no allowance. `/api/health` reports the
+policy and the limits in force.
+
+**How a "caller" is identified.** From `x-vercel-forwarded-for`, which
+Vercel's edge writes and overwrites — a client cannot forge it.
+`x-forwarded-for` **can** be forged by anyone, so it is only a fallback for
+other hosts; behind a different proxy, make sure it is trustworthy or the
+limits are decorative.
+
+IPv6 is bucketed by **/64**, not by the full address. This is not theoretical:
+testing the live deployment, five attempts from one machine produced four
+accounts against a limit of three, because privacy extensions rotated the
+address between requests three seconds apart. The /64 is the prefix a customer
+is actually assigned. IPv4 is used whole — a /24 would lump unrelated
+customers together and lock out an office because of one person. The address
+is stored as an HMAC, never in the clear: rate limiting needs to recognise a
+repeat caller, not keep a log of who visited a personal finance site.
+
+### What open registration does not give you
+
+- **Addresses are not verified.** Anyone can register with any address they
+  like, including someone else's, because nothing emails them to check. If
+  that matters, configure mail (§4) — and note that verification at sign-up is
+  still not implemented, only password reset.
+- **Everyone's books share one database.** Accounts are fully isolated from
+  each other, but they draw on the same Postgres storage and the same plan.
+  `MAX_ACCOUNTS` is the blunt instrument for keeping that bounded.
+- **`409` on a taken address is unavoidable in open mode.** Telling someone an
+  address is already registered is how open signup has to work; it does mean
+  the endpoint confirms whether a given address has an account. With
+  `allowlist` this does not apply, because the allowlist is checked first and
+  a refused caller learns nothing.
 
 ## 3. Optional: a session secret
 
@@ -173,7 +239,8 @@ work; never commit a file with real values (`.gitignore` excludes them).
 | Variable | Required | Meaning |
 |---|---|---|
 | `DATABASE_URL` | **yes** | Postgres connection string (aliases above) |
-| `ALLOWED_EMAILS` | no | who may create an account; unset = first registration claims it |
+| `ALLOW_SIGNUPS` | no | `open` / `closed` / `allowlist` (default) |
+| `ALLOWED_EMAILS` | no | who may register when the policy is `allowlist` |
 | `AUTH_SECRET` | no | keys the HMAC over session tokens |
 | `RESEND_API_KEY` | no | enables "Forgot your password?" |
 | `MAIL_FROM` | no | the sender address reset email comes from |
