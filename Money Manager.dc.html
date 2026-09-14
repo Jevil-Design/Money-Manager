@@ -1422,6 +1422,13 @@ function mmNiceDate(iso) {
 function mmDaysBetween(from, to) {
   return Math.round((mmParse(to).getTime() - mmParse(from).getTime()) / 86400000);
 }
+/* 1st, 2nd, 3rd, 4th ... 11th, 12th, 13th, 21st. */
+function mmOrdinal(n) {
+  n = parseInt(n, 10) || 0;
+  var teen = n % 100;
+  if (teen >= 11 && teen <= 13) return n + 'th';
+  return n + (['th', 'st', 'nd', 'rd'][n % 10] || 'th');
+}
 
 /* ---------------------------------------------------------------------------
    A credit card's billing cycle, worked out from two days of the month and
@@ -1439,7 +1446,33 @@ function mmDaysBetween(from, to) {
        not exist in every month and a cycle that silently skips February is
        worse than one that closes three days early
    --------------------------------------------------------------------------- */
-function mmCardCycle(stmtDayRaw, dueDayRaw, asOf) {
+/* Turn the two dates printed on a statement into the recurring rule behind
+   them.  Returns null if either is missing or they are the wrong way round.
+
+   Deriving the DAYS from dates is easy. The part that needs the dates is
+   which month the payment falls in: a card whose statement closes on the 2nd
+   and is due on the 22nd of the NEXT month cannot be told apart, from the two
+   day numbers alone, from one due on the 22nd of the SAME month. Guessing
+   from "is the due day after the statement day" gets that card wrong by a
+   month. The dates say it outright, so they are what decides it. */
+function mmCycleFromDates(stmtIso, dueIso) {
+  var isDate = function (v) { return /^\d{4}-\d{2}-\d{2}$/.test(String(v || '')); };
+  if (!isDate(stmtIso) || !isDate(dueIso)) return null;
+  var s = mmParse(stmtIso), d = mmParse(dueIso);
+  if (d.getTime() < s.getTime()) return null;          /* due before it closes */
+  var months = (d.getFullYear() - s.getFullYear()) * 12 + (d.getMonth() - s.getMonth());
+  return {
+    stmtDayRaw: s.getDate(),
+    dueDayRaw: d.getDate(),
+    stmtDay: Math.min(28, Math.max(1, s.getDate())),
+    dueDay: Math.min(28, Math.max(1, d.getDate())),
+    dueNextMonth: months >= 1,
+    monthsApart: months,
+    gapDays: mmDaysBetween(stmtIso, dueIso)
+  };
+}
+
+function mmCardCycle(stmtDayRaw, dueDayRaw, asOf, dueNextMonth) {
   var wantStmt = parseInt(stmtDayRaw, 10);
   var wantDue = parseInt(dueDayRaw, 10);
   var stmtDay = Math.min(28, Math.max(1, isFinite(wantStmt) ? wantStmt : 25));
@@ -1454,14 +1487,20 @@ function mmCardCycle(stmtDayRaw, dueDayRaw, asOf) {
   var lastStmt = mmIso(new Date(y, m, stmtDay));
   var prevStmt = mmIso(new Date(y, m - 1, stmtDay));
   var nextStmt = mmIso(new Date(y, m + 1, stmtDay));
+  /* Which month the payment lands in.  Told outright when the card was set
+     up from real dates; otherwise inferred the way it always was, so a card
+     configured before this existed behaves exactly as before. */
+  var nextMonth = (dueNextMonth === true || dueNextMonth === false)
+    ? dueNextMonth
+    : !(dueDay > stmtDay);
   var dueFor = function (mm) {
-    return mmIso(new Date(y, mm + (dueDay > stmtDay ? 0 : 1), dueDay));
+    return mmIso(new Date(y, mm + (nextMonth ? 1 : 0), dueDay));
   };
   var ls = mmParse(lastStmt);
   var cycleStart = mmIso(new Date(ls.getFullYear(), ls.getMonth(), ls.getDate() + 1));
 
   return {
-    stmtDay: stmtDay, dueDay: dueDay, today: today,
+    stmtDay: stmtDay, dueDay: dueDay, today: today, dueNextMonth: nextMonth,
     /* Was either day pulled back to 28? The dialog says so rather than
        quietly changing what was typed. */
     stmtClamped: isFinite(wantStmt) && wantStmt !== stmtDay,
@@ -2539,6 +2578,15 @@ class Component extends DCLogic {
       if (a.type === 'credit') {
         if (a.stmtDay === undefined) { a.stmtDay = Math.max(1, (+a.dueDay || 15) - 20) || 25; changed = true; }
         if (a.dueDay === undefined) { a.dueDay = 15; changed = true; }
+        /* Which month the payment falls in, now recorded rather than guessed.
+           Backfilled with exactly the guess that was used before, so a card
+           set up earlier keeps the cycle it already had. */
+        if (a.dueNextMonth === undefined) {
+          a.dueNextMonth = !((+a.dueDay || 15) > (+a.stmtDay || 25));
+          changed = true;
+        }
+        if (a.stmtRefDate === undefined) { a.stmtRefDate = ''; changed = true; }
+        if (a.dueRefDate === undefined) { a.dueRefDate = ''; changed = true; }
         if (a.minPct === undefined) { a.minPct = 5; changed = true; }
         if (a.rate === undefined) { a.rate = 42; changed = true; }
         if (a.annualFee === undefined) { a.annualFee = 0; changed = true; }
@@ -3132,7 +3180,7 @@ class Component extends DCLogic {
     /* One implementation of the cycle, shared with the account dialog's
        preview, so what is shown before a card is saved is what is used
        after it. */
-    var cyc = mmCardCycle(a.stmtDay, a.dueDay, today);
+    var cyc = mmCardCycle(a.stmtDay, a.dueDay, today, a.dueNextMonth);
     var lastStmt = cyc.lastStatement;      /* the statement that has closed */
     var prevStmt = cyc.previousStatement;  /* the one before that */
     var due = cyc.dueDate;                 /* when the closed one must be paid */
@@ -7510,7 +7558,8 @@ class Component extends DCLogic {
         kind: 'account', mode: mode,
         data: mode === 'edit' ? mmClone(preset) : {
           id: '', name: '', type: d.type || 'bank', opening: 0, currency: 'INR', color: '#2b5f96',
-          limit: 0, stmtDay: 25, dueDay: 15, minPct: 5, rate: 42, annualFee: 0, lateFee: 0,
+          limit: 0, stmtDay: 25, dueDay: 15, dueNextMonth: true,
+          stmtRefDate: '', dueRefDate: '', minPct: 5, rate: 42, annualFee: 0, lateFee: 0,
           institution: '', number: '', notes: '', archived: false
         }
       }
@@ -7530,8 +7579,32 @@ class Component extends DCLogic {
     if (!isFinite(a.opening)) a.opening = 0;
     delete a.owed;                                   /* display-only helper field */
     a.limit = Math.max(0, parseFloat(a.limit) || 0);
+    /* Two dates off a statement are what a person has in front of them; the
+       day numbers and the due-month offset are derived from them and remain
+       what every calculation downstream reads. Leave the dates out and the
+       existing days stand, so an older card is not disturbed. */
+    if (a.type === 'credit') {
+      var stmtRef = String(a.stmtRefDate || '').trim();
+      var dueRef = String(a.dueRefDate || '').trim();
+      if (stmtRef && dueRef) {
+        var derived = mmCycleFromDates(stmtRef, dueRef);
+        if (!derived) {
+          this.flash('The payment due date is on or before the statement date — a bill is paid after it closes.');
+          return;
+        }
+        a.stmtDay = derived.stmtDay;
+        a.dueDay = derived.dueDay;
+        a.dueNextMonth = derived.dueNextMonth;
+      } else if (stmtRef || dueRef) {
+        this.flash('Enter both the statement date and the payment due date, or neither.');
+        return;
+      }
+    }
     a.stmtDay = Math.min(28, Math.max(1, parseInt(a.stmtDay, 10) || 25));
     a.dueDay = Math.min(28, Math.max(1, parseInt(a.dueDay, 10) || 15));
+    if (a.dueNextMonth !== true && a.dueNextMonth !== false) {
+      a.dueNextMonth = !(a.dueDay > a.stmtDay);
+    }
     a.minPct = Math.min(100, Math.max(0, parseFloat(a.minPct) || 0));
     a.rate = Math.max(0, parseFloat(a.rate) || 0);
     a.annualFee = Math.max(0, parseFloat(a.annualFee) || 0);
@@ -8465,14 +8538,35 @@ class Component extends DCLogic {
       fields.push(this.fld('Colour', 'select', a.color, set('color'), { options: [{ v: '#2b5f96', l: 'Blue' }, { v: '#3d8f52', l: 'Green' }, { v: '#b23b31', l: 'Red' }, { v: '#6b5aa8', l: 'Violet' }] }));
       if (a.type === 'credit') {
         fields.push(this.fld('Credit limit', 'text', a.limit, set('limit'), { type: 'number' }));
-        fields.push(this.fld('Statement day', 'text', a.stmtDay, set('stmtDay'), { type: 'number', hint: 'day of the month the bill is generated' }));
-        fields.push(this.fld('Payment due day', 'text', a.dueDay, set('dueDay'), { type: 'number', hint: 'day of the month payment is due' }));
+        /* The two dates printed on the statement, rather than two day
+           numbers to work out. They also settle which month the payment
+           falls in, which day numbers alone cannot say. */
+        fields.push(this.fld('Statement date', 'text', a.stmtRefDate, set('stmtRefDate'),
+          { type: 'date', hint: 'the date on your latest statement' }));
+        fields.push(this.fld('Payment due date', 'text', a.dueRefDate, set('dueRefDate'),
+          { type: 'date', hint: 'the due date printed on that statement' }));
         /* Two days of the month are hard to picture. Turn them into the real
            dates they produce against today, so a wrong entry is obvious here
            rather than a month later when a bill lands early. */
         (function () {
-          var cyc = mmCardCycle(a.stmtDay, a.dueDay);
           var plural = function (n, word) { return n + ' ' + word + (n === 1 ? '' : 's'); };
+          var typedStmt = String(a.stmtRefDate || '').trim();
+          var typedDue = String(a.dueRefDate || '').trim();
+          var derived = mmCycleFromDates(typedStmt, typedDue);
+
+          /* Both dates the wrong way round is the one case worth stopping on,
+             because every date below would be nonsense. */
+          if (typedStmt && typedDue && !derived) {
+            fields.push(self.fld('Billing cycle', 'static',
+              'The due date is on or before the statement date.\nCheck both — a bill is paid after it closes, not before.',
+              null, { wrap: true, color: 'var(--c-8c2a24)' }));
+            return;
+          }
+
+          var cyc = derived
+            ? mmCardCycle(derived.stmtDay, derived.dueDay, null, derived.dueNextMonth)
+            : mmCardCycle(a.stmtDay, a.dueDay, null, a.dueNextMonth);
+
           var lines = [
             'Now collecting   ' + mmNiceDate(cyc.cycleStart) + '  →  ' + mmNiceDate(cyc.cycleEnd) +
               '   (closes in ' + plural(cyc.daysToStatement, 'day') + ')',
@@ -8486,14 +8580,31 @@ class Component extends DCLogic {
               '   due ' + mmNiceDate(cyc.dueDate) +
               (cyc.daysToDue === 0 ? '   (today)' : '   (in ' + plural(cyc.daysToDue, 'day') + ')'));
           }
+          lines.push('Repeats          closes the ' + mmOrdinal(cyc.stmtDay) +
+            ', due the ' + mmOrdinal(cyc.dueDay) +
+            (cyc.dueNextMonth ? ' of the next month' : ' of the same month'));
+
           var notes = [];
-          if (cyc.stmtClamped) notes.push('statement day set to ' + cyc.stmtDay);
-          if (cyc.dueClamped) notes.push('due day set to ' + cyc.dueDay);
-          var hint = notes.length
-            ? notes.join(' and ') + ' — days after the 28th do not exist in every month'
-            : 'worked out from today, ' + mmNiceDate(cyc.today);
-          fields.push(self.fld('Billing cycle', 'static', lines.join('\n'), null,
-            { wrap: true, hint: hint }));
+          if (!derived) {
+            notes.push(typedStmt || typedDue
+              ? 'both dates are needed before this can be exact'
+              : 'using the ' + mmOrdinal(cyc.stmtDay) + ' and the ' + mmOrdinal(cyc.dueDay) +
+                ' — fill in the two dates to set them from your statement');
+          }
+          if (derived && derived.stmtDayRaw > 28) {
+            notes.push('a statement on the ' + mmOrdinal(derived.stmtDayRaw) +
+              ' is treated as the 28th, since not every month has one');
+          }
+          if (derived && derived.dueDayRaw > 28) {
+            notes.push('a due date on the ' + mmOrdinal(derived.dueDayRaw) + ' is treated as the 28th');
+          }
+          if (derived && derived.monthsApart > 1) {
+            notes.push('those dates are ' + derived.monthsApart + ' months apart — check the year');
+          }
+          fields.push(self.fld('Billing cycle', 'static', lines.join('\n'), null, {
+            wrap: true,
+            hint: notes.length ? notes.join('; ') : 'worked out from today, ' + mmNiceDate(cyc.today)
+          }));
         })();
         fields.push(this.fld('Minimum due %', 'text', a.minPct, set('minPct'), { type: 'number', hint: 'usually 5' }));
         fields.push(this.fld('Interest rate % p.a.', 'text', a.rate, set('rate'), { type: 'number' }));

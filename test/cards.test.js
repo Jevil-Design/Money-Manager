@@ -42,9 +42,10 @@ class StubLogic {
   }
   forceUpdate() {}
 }
-const { Component, mmCardCycle, mmNiceDate, mmDaysBetween } =
+const { Component, mmCardCycle, mmCycleFromDates, mmNiceDate, mmDaysBetween, mmOrdinal } =
   new Function('DCLogic', 'StreamableLogic', 'React',
-    src + '\n;return { Component, mmCardCycle, mmNiceDate, mmDaysBetween };')(StubLogic, StubLogic, {});
+    src + '\n;return { Component, mmCardCycle, mmCycleFromDates, mmNiceDate, ' +
+    'mmDaysBetween, mmOrdinal };')(StubLogic, StubLogic, {});
 
 /* ------------------------------------------------------------ the base case */
 
@@ -255,6 +256,169 @@ console.log('\nA saved card agrees with what the dialog previewed');
     s3.statementBalance === 0, String(s3.statementBalance));
   ok('while the unbilled spend still stands', s3.unbilled === 2000, String(s3.unbilled));
   ok('and nothing is due', s3.minDue === 0, String(s3.minDue));
+}
+
+/* ------------------------------------------------- set up from real dates */
+
+console.log('\nThe two dates off a statement become the recurring rule');
+{
+  const d = mmCycleFromDates('2026-09-25', '2026-10-15');
+  ok('the statement day comes from the statement date', d.stmtDay === 25, String(d.stmtDay));
+  ok('the due day comes from the due date', d.dueDay === 15, String(d.dueDay));
+  ok('and the payment is in the following month', d.dueNextMonth === true);
+  ok('20 days apart', d.gapDays === 20, String(d.gapDays));
+  ok('one month apart', d.monthsApart === 1, String(d.monthsApart));
+}
+{
+  /* Same month: closes on the 5th, due on the 25th. */
+  const d = mmCycleFromDates('2026-09-05', '2026-09-25');
+  ok('a same-month due date is recorded as such', d.dueNextMonth === false);
+  ok('with the right days', d.stmtDay === 5 && d.dueDay === 25);
+}
+{
+  /* THE case two day numbers cannot express: the due day is AFTER the
+     statement day, but in the NEXT month. Inferring from the numbers alone
+     puts this bill a month early. */
+  const d = mmCycleFromDates('2026-09-02', '2026-10-22');
+  ok('statement 2nd, due 22nd of the NEXT month is captured', d.dueNextMonth === true,
+    String(d.dueNextMonth));
+  const told = mmCardCycle(d.stmtDay, d.dueDay, '2026-09-10', d.dueNextMonth);
+  ok('the cycle honours it — due in October', told.dueDate === '2026-10-22', told.dueDate);
+  const guessed = mmCardCycle(d.stmtDay, d.dueDay, '2026-09-10');
+  ok('while guessing from the numbers alone would have said September',
+    guessed.dueDate === '2026-09-22', guessed.dueDate);
+  ok('which is the month of error the dates remove',
+    told.dueDate !== guessed.dueDate);
+}
+{
+  /* Dates the wrong way round, and incomplete input. */
+  ok('a due date before the statement is rejected',
+    mmCycleFromDates('2026-09-25', '2026-09-20') === null);
+  ok('a missing statement date is rejected', mmCycleFromDates('', '2026-10-15') === null);
+  ok('a missing due date is rejected', mmCycleFromDates('2026-09-25', '') === null);
+  ok('rubbish is rejected', mmCycleFromDates('not-a-date', 'nor-this') === null);
+  ok('null is rejected', mmCycleFromDates(null, null) === null);
+  ok('the same day for both is allowed — some cards do close and fall due together',
+    mmCycleFromDates('2026-09-25', '2026-09-25') !== null);
+}
+{
+  /* A statement on the 31st still has to become a day that exists. */
+  const d = mmCycleFromDates('2026-01-31', '2026-02-20');
+  ok('the 31st is reported raw so the dialog can explain it', d.stmtDayRaw === 31,
+    String(d.stmtDayRaw));
+  ok('but the stored day is pulled back to 28', d.stmtDay === 28, String(d.stmtDay));
+  ok('and the cycle it produces is a real date',
+    /^\d{4}-\d{2}-28$/.test(mmCardCycle(d.stmtDay, d.dueDay, '2026-03-05', d.dueNextMonth).lastStatement));
+}
+
+console.log('\nA card set up from dates behaves that way once saved');
+{
+  const c = new Component({});
+  c.state.db.accounts = [];
+  c.state.db.txns = [];
+  /* Exactly what the dialog holds while being filled in. */
+  c.state.dlg = {
+    kind: 'account', mode: 'add',
+    data: {
+      id: '', name: 'Test Card', type: 'credit', opening: 0, currency: 'INR', color: '#2b5f96',
+      limit: 100000, stmtDay: 25, dueDay: 15, dueNextMonth: true,
+      stmtRefDate: '2026-09-02', dueRefDate: '2026-10-22',
+      minPct: 5, rate: 42, annualFee: 0, lateFee: 0,
+      institution: '', number: '', notes: '', archived: false
+    }
+  };
+  c.saveAccount();
+  const saved = c.state.db.accounts[0];
+  ok('the card was created', !!saved, String(c.state.db.accounts.length));
+  ok('the statement day was derived from the date', saved.stmtDay === 2, String(saved.stmtDay));
+  ok('the due day was derived from the date', saved.dueDay === 22, String(saved.dueDay));
+  ok('and the month offset was taken from the dates, not guessed',
+    saved.dueNextMonth === true, String(saved.dueNextMonth));
+  ok('the dates are kept so the dialog can show them again',
+    saved.stmtRefDate === '2026-09-02' && saved.dueRefDate === '2026-10-22');
+
+  const cs = c.cardState(saved, '2026-09-10');
+  ok('the saved card bills on the 2nd', cs.lastStatement === '2026-09-02', cs.lastStatement);
+  ok('and falls due on 22 October, a month later', cs.dueDate === '2026-10-22', cs.dueDate);
+}
+{
+  /* Dates the wrong way round must not be saved. */
+  const c = new Component({});
+  c.state.db.accounts = [];
+  c.state.dlg = {
+    kind: 'account', mode: 'add',
+    data: {
+      id: '', name: 'Bad Card', type: 'credit', opening: 0, currency: 'INR', color: '#2b5f96',
+      limit: 0, stmtDay: 25, dueDay: 15, stmtRefDate: '2026-09-25', dueRefDate: '2026-09-20',
+      minPct: 5, rate: 42, annualFee: 0, lateFee: 0,
+      institution: '', number: '', notes: '', archived: false
+    }
+  };
+  c.saveAccount();
+  ok('a due date before the statement date is refused', c.state.db.accounts.length === 0,
+    String(c.state.db.accounts.length));
+  ok('and the dialog stays open to be corrected', !!c.state.dlg);
+
+  /* One date without the other is ambiguous, so it is refused too. */
+  c.state.dlg.data.dueRefDate = '';
+  c.saveAccount();
+  ok('one date without the other is refused', c.state.db.accounts.length === 0);
+}
+{
+  /* No dates at all: the day numbers still work, exactly as before. */
+  const c = new Component({});
+  c.state.db.accounts = [];
+  c.state.dlg = {
+    kind: 'account', mode: 'add',
+    data: {
+      id: '', name: 'Plain Card', type: 'credit', opening: 0, currency: 'INR', color: '#2b5f96',
+      limit: 0, stmtDay: 18, dueDay: 8, stmtRefDate: '', dueRefDate: '',
+      minPct: 5, rate: 42, annualFee: 0, lateFee: 0,
+      institution: '', number: '', notes: '', archived: false
+    }
+  };
+  c.saveAccount();
+  const saved = c.state.db.accounts[0];
+  ok('a card with no dates still saves', !!saved);
+  ok('keeping the days as entered', saved.stmtDay === 18 && saved.dueDay === 8,
+    saved.stmtDay + '/' + saved.dueDay);
+  ok('with the month offset filled in by the old inference',
+    saved.dueNextMonth === true, String(saved.dueNextMonth));
+}
+
+console.log('\nA card set up before this existed is not disturbed');
+{
+  const c = new Component({});
+  /* No dueNextMonth, no ref dates — the shape an older card has. */
+  const old = {
+    id: 'old1', name: 'Old Card', type: 'credit', opening: -5000, currency: 'INR',
+    limit: 50000, stmtDay: 25, dueDay: 15, minPct: 5, rate: 42,
+    archived: false, createdAt: 1, updatedAt: 1
+  };
+  const before = c.cardStateAt(Object.assign({}, old), '2026-09-14');
+  c.state.db.accounts = [old];
+  c.state.db.txns = [];
+  const db = c.migrate({ accounts: [Object.assign({}, old)], txns: [], schemaVersion: 4 });
+  const migrated = db.accounts[0];
+  ok('the migration fills in the month offset', migrated.dueNextMonth === true,
+    String(migrated.dueNextMonth));
+  ok('and leaves the days alone', migrated.stmtDay === 25 && migrated.dueDay === 15);
+  ok('the ref dates start empty', migrated.stmtRefDate === '' && migrated.dueRefDate === '');
+  c.state.db.accounts = [migrated];
+  c.bumpRev();
+  const after = c.cardStateAt(migrated, '2026-09-14');
+  ok('and the cycle is identical to before the change',
+    after.lastStatement === before.lastStatement && after.dueDate === before.dueDate,
+    after.dueDate + ' vs ' + before.dueDate);
+}
+
+console.log('\nOrdinals read correctly');
+{
+  ok('1st, 2nd, 3rd', mmOrdinal(1) === '1st' && mmOrdinal(2) === '2nd' && mmOrdinal(3) === '3rd');
+  ok('4th and 5th', mmOrdinal(4) === '4th' && mmOrdinal(5) === '5th');
+  ok('the teens are all th', mmOrdinal(11) === '11th' && mmOrdinal(12) === '12th' && mmOrdinal(13) === '13th');
+  ok('21st, 22nd, 23rd', mmOrdinal(21) === '21st' && mmOrdinal(22) === '22nd' && mmOrdinal(23) === '23rd');
+  ok('28th', mmOrdinal(28) === '28th');
 }
 
 /* --------------------------------------------------------------- formatting */

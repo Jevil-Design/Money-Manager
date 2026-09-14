@@ -1375,6 +1375,9 @@ function sampleBook(now) {
     acct('Bank Account', 'bank', 60000, { institution: 'Your Bank', number: '4321' }),
     acct('Credit Card', 'credit', 0, {
       limit: 100000, stmtDay: 25, dueDay: 15, rate: 42, minPct: 5,
+      /* Due on the 15th of the month AFTER the statement closes on the 25th.
+         Recorded rather than inferred — see mmCycleFromDates in the app. */
+      dueNextMonth: true, stmtRefDate: '', dueRefDate: '',
       annualFee: 500, lateFee: 750, institution: 'Your Bank', number: '8842'
     }),
     acct('Wallet', 'wallet', 1500)
