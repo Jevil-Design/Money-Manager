@@ -56,12 +56,28 @@ function makeDb(seedUsers) {
       if (/COUNT\(\*\)::int AS n FROM mm_user/.test(s)) {
         return { rows: [{ n: state.users.length }], rowCount: 1 };
       }
+      /* The sign-in lookup wants the whole row, including the password
+         columns — checked before the id-only lookup, which its pattern would
+         otherwise not reach. */
+      if (/SELECT \* FROM mm_user WHERE lower\(email\)/.test(s)) {
+        const u = state.users.find((x) => x.email.toLowerCase() === params[0]);
+        return { rows: u ? [u] : [], rowCount: u ? 1 : 0 };
+      }
+      if (/UPDATE mm_user SET fail_count|UPDATE mm_user SET salt/.test(s)) {
+        return { rows: [], rowCount: 1 };
+      }
       if (/SELECT id FROM mm_user WHERE lower\(email\)/.test(s)) {
         const u = state.users.find((x) => x.email.toLowerCase() === params[0]);
         return { rows: u ? [{ id: u.id }] : [], rowCount: u ? 1 : 0 };
       }
       if (/INSERT INTO mm_user/.test(s)) {
-        const u = { id: params[0], email: params[1], name: params[2], created_at: new Date().toISOString() };
+        /* Keep the password columns too: without them nothing can verify a
+           sign-in, and the register INSERT really does write them. */
+        const u = {
+          id: params[0], email: params[1], name: params[2], token_hash: '',
+          salt: params[3], pw_hash: params[4], pw_iters: params[5], pw_algo: params[6],
+          fail_count: 0, locked_until: null, created_at: new Date().toISOString()
+        };
         state.users.push(u);
         state.created.push(u);
         return { rows: [], rowCount: 1 };
@@ -336,6 +352,61 @@ const from = (ip) => ({ 'x-vercel-forwarded-for': ip });
       blocked.raw.slice(0, 200));
     ok('and no stack trace or SQL', !/\bat \w|SELECT |INSERT /.test(blocked.raw));
     server.close();
+  }
+
+  /* ----------------------------------------------------------------- 8b */
+  console.log('\nSpraying passwords across many accounts is limited');
+  {
+    /* The per-account lockout stops grinding at ONE account. It never sees a
+       few guesses each against a thousand different addresses, because no
+       single account's counter gets high enough. This limit does. */
+    const db = makeDb([]);
+    const server = await startServer(loadApi(db.module,
+      { DATABASE_URL: DB, VERCEL_ENV: 'production', ALLOW_SIGNUPS: 'open' }));
+    const port = server.address().port;
+    const ip = from('198.51.100.60');
+
+    const seen = [];
+    for (let i = 0; i < 15; i++) {
+      /* A DIFFERENT address every time — nothing an account-level counter
+         would ever notice. */
+      const r = await call(port, 'POST', '/api/v1/auth/login',
+        { email: 'victim' + i + '@example.com', password: 'guess' + i }, ip);
+      seen.push(r.status);
+    }
+    const refused = seen.filter((s) => s === 401).length;
+    const throttled = seen.filter((s) => s === 429).length;
+    ok('the first dozen are refused as wrong', refused === 12, seen.join(','));
+    ok('then the caller is throttled', throttled === 3, seen.join(','));
+    ok('the throttle reads as temporary',
+      /wait a few minutes/i.test((await call(port, 'POST', '/api/v1/auth/login',
+        { email: 'x@example.com', password: 'y' }, ip)).body.error));
+
+    /* A different caller is unaffected. */
+    const other = await call(port, 'POST', '/api/v1/auth/login',
+      { email: 'someone@example.com', password: 'nope' }, from('198.51.100.61'));
+    ok('someone else is not caught by that', other.status === 401, String(other.status));
+    server.close();
+  }
+  {
+    /* Successful sign-ins must not use up the allowance — a household
+       signing in all day is not an attack. */
+    const db = makeDb([]);
+    const server = await startServer(loadApi(db.module,
+      { DATABASE_URL: DB, VERCEL_ENV: 'production', ALLOW_SIGNUPS: 'open' }));
+    const port = server.address().port;
+    const ip = from('198.51.100.70');
+    const made = await call(port, 'POST', '/api/v1/auth/register',
+      reg({ email: 'real@example.com', password: 'abcdefg1', password2: 'abcdefg1' }), ip);
+    ok('an account exists to sign in to', made.status === 200, String(made.status));
+
+    const results = [];
+    for (let i = 0; i < 15; i++) {
+      results.push((await call(port, 'POST', '/api/v1/auth/login',
+        { email: 'real@example.com', password: 'abcdefg1' }, ip)).status);
+    }
+    ok('fifteen successful sign-ins are all allowed',
+      results.every((s) => s === 200), results.join(','));
   }
 
   /* ------------------------------------------------------------------ 9 */

@@ -1021,6 +1021,15 @@ const RATE = {
 };
 const MAX_ACCOUNTS = intEnv('MAX_ACCOUNTS', 0);      /* 0 = no ceiling */
 
+/* Failed sign-ins from one caller, over 15 minutes.
+   The per-account lockout already existed and stops someone grinding at ONE
+   account. It does nothing about the opposite shape of attack: a few guesses
+   each against a thousand different addresses, which never trips any single
+   account's counter. This is the limit that sees that. Only failures are
+   counted, so a busy household signing in repeatedly is unaffected. */
+const LOGIN_FAILS_PER_CALLER = intEnv('LOGIN_LIMIT_FAILS', 12);
+const LOGIN_WINDOW_MINUTES = 15;
+
 /* The caller's address, as the platform sees it.
    x-vercel-forwarded-for is written by Vercel's edge and overwrites anything
    the client sent, so it cannot be spoofed. x-forwarded-for CAN be, by
@@ -1090,7 +1099,11 @@ async function rateHits(client, bucket, minutes) {
     `SELECT COUNT(*)::int AS n FROM mm_rate
       WHERE bucket = $1 AND created_at > now() - ($2 || ' minutes')::interval`,
     [bucket, String(minutes)]);
-  return Number(rows[0].n) || 0;
+  /* A COUNT always returns a row — but reading rows[0] without checking is
+     how a rate limiter turns a missing row into a 500 on the sign-in page,
+     and "fail open on the counter, not closed on the login" is the right
+     failure for a limit that exists to slow abuse rather than to authorise. */
+  return rows && rows.length ? (Number(rows[0].n) || 0) : 0;
 }
 
 async function rateNote(client, bucket) {
@@ -1999,10 +2012,23 @@ async function handleRequest(req, res) {
         const email = normEmail(body.email);
         if (!email || !body.password) return send(res, 422, { error: 'Enter your email and password.' });
 
+        /* Before touching the account: has this caller been failing a lot?
+           Checked first so a spray costs a counter read rather than a
+           password hash. */
+        const loginBucket = rateBucket('login-fail', req);
+        if (await rateHits(client, loginBucket, LOGIN_WINDOW_MINUTES) >= LOGIN_FAILS_PER_CALLER) {
+          console.error('money-manager login: refused, too many failures from one caller');
+          return send(res, 429, {
+            error: 'Too many failed sign-in attempts from here. Please wait a few minutes and try again.',
+            code: 'throttled'
+          });
+        }
+
         const found = await query(client, 'SELECT * FROM mm_user WHERE lower(email) = $1', [email]);
         if (!found.rows.length) {
           /* Spend comparable time so a missing account is not detectable. */
           await burnPasswordTime(body.password);
+          await rateNote(client, loginBucket);
           return send(res, 401, { error: 'That email and password don’t match an account.', code: 'bad_credentials' });
         }
         const user = found.rows[0];
@@ -2021,6 +2047,7 @@ async function handleRequest(req, res) {
         }
         const check = await verifyPassword(user, body.password);
         if (!check.ok) {
+          await rateNote(client, loginBucket);
           const lock = await noteFailure(client, user);
           return send(res, 401, {
             error: lock

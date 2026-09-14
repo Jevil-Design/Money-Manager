@@ -2031,6 +2031,7 @@ class Component extends DCLogic {
       var needsSave = !hasServerDoc || !!db.__migrated;
       delete db.__migrated;
       self.docRev = Number((r.state && r.state.rev) || 0);
+      self.confirmCookieSession();
       self.setAuth({ notice: 'Account created successfully. Opening Money Manager…' });
       self.enterSession(r.user, db, 'Account created. Welcome, ' + name + '.');
       return needsSave ? self.saveNow() : true;
@@ -2054,6 +2055,7 @@ class Component extends DCLogic {
       self.setToken(r.token);
       self.rememberEmail(email);
       self.setAuth({ notice: 'Opening your books…' });
+      self.confirmCookieSession();
       return self.loadDocument(r.user);
     }).catch(function (e) {
       self.setAuth({
@@ -2709,10 +2711,27 @@ class Component extends DCLogic {
     return this.sameOrigin();                 /* served from the same deployment */
   }
   token() { return this.sessionToken || ''; }
-  setToken(t) {
+
+  /* Where the session is kept.
+   *
+   * Served from the same origin as the API — the normal case — the session
+   * rides on the HttpOnly cookie the server sets. Nothing goes into
+   * localStorage at all, so a cross-site scripting bug cannot walk off with a
+   * 30-day session: script cannot read that cookie, by definition.
+   *
+   * Pointed at a custom server on another origin, the browser will not send
+   * that cookie, so the bearer token is the only thing that can work and is
+   * stored as it always was. */
+  usesCookieSession() {
+    var base = this.apiBase();
+    return !!base && base === this.sameOrigin();
+  }
+  setToken(t, opts) {
     this.sessionToken = t || '';
+    /* persist:true is the fallback for a browser that refused the cookie. */
+    var persist = !this.usesCookieSession() || !!(opts && opts.persist);
     try {
-      if (t) localStorage.setItem(MM_SESSION_KEY, t);
+      if (t && persist) localStorage.setItem(MM_SESSION_KEY, t);
       else localStorage.removeItem(MM_SESSION_KEY);
     } catch (e) { /* a blocked store just means signing in again next time */ }
   }
@@ -2720,6 +2739,25 @@ class Component extends DCLogic {
     try { this.sessionToken = localStorage.getItem(MM_SESSION_KEY) || ''; }
     catch (e) { this.sessionToken = ''; }
     return this.sessionToken;
+  }
+
+  /* Having just signed in, check the cookie actually carries the session.
+     If the browser refused it — third-party cookie blocking, a hardened
+     profile — keep the token after all, so the next reload still signs in
+     rather than silently logging someone out. */
+  confirmCookieSession() {
+    var self = this;
+    var token = this.sessionToken;
+    if (!token || !this.usesCookieSession()) return Promise.resolve(true);
+    return this.api('/api/v1/auth/session', { noAuth: true }).then(function () {
+      return true;
+    }).catch(function (e) {
+      if (e && e.status === 401) {
+        self.setToken(token, { persist: true });
+        return false;
+      }
+      return true;                    /* a network blip proves nothing */
+    });
   }
 
   /* One place for every call: attaches the token, reads the reply, and turns
@@ -2833,7 +2871,9 @@ class Component extends DCLogic {
       return Promise.resolve();
     }
     var token = this.loadToken();
-    if (!token) {
+    /* With a cookie session there is nothing stored to look at, so the only
+       way to know whether we are signed in is to ask. */
+    if (!token && !this.usesCookieSession()) {
       this.setAuth({ phase: 'login', busy: false, error: '' });
       return Promise.resolve();
     }
