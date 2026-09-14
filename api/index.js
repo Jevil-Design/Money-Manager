@@ -971,6 +971,113 @@ async function clearFailures(client, userId) {
   await query(client, 'UPDATE mm_user SET fail_count = 0, locked_until = NULL WHERE id = $1', [userId]).catch(() => {});
 }
 
+/* ------------------------------------------------- encryption at rest
+
+   Every book and every snapshot is encrypted before it reaches Postgres, with
+   a key that lives in the environment and never in the database. A leaked
+   dump, a compromised database account or a stolen backup is then ciphertext.
+
+   What this does NOT defend against, stated plainly: anyone who can run code
+   in the deployment can read the key and therefore the data. Defending
+   against that needs end-to-end encryption in the browser, which costs the
+   ability to ever recover a forgotten password. This is the trade that keeps
+   password reset working.
+
+   AES-256-GCM: authenticated, so a tampered row fails to decrypt rather than
+   silently returning altered figures. A fresh 12-byte IV per write, which
+   matters because reusing one with GCM is catastrophic.
+
+   DATA_KEY      32 bytes, base64url — the key everything is written with
+   DATA_KEY_OLD  optional, comma-separated — decrypt-only, so a key can be
+                 rotated without rewriting every row first
+
+   With no key set, documents are written as plain JSON exactly as before, and
+   an encrypted row is still readable the moment the key comes back. Reads
+   always accept both shapes, so turning this on is not a migration: rows
+   encrypt themselves as they are next written.
+*/
+function parseDataKey(raw, label) {
+  const s = String(raw || '').trim();
+  if (!s) return null;
+  let buf;
+  try {
+    buf = Buffer.from(s, 'base64');                 /* base64url decodes too */
+  } catch (e) { buf = null; }
+  if (!buf || buf.length !== 32) {
+    console.error('money-manager crypto: ' + label + ' is not 32 bytes of base64 and was ignored. ' +
+      'Generate one with: node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'base64url\'))"');
+    return null;
+  }
+  return { key: buf, kid: crypto.createHash('sha256').update(buf).digest('hex').slice(0, 8) };
+}
+
+const DATA_KEY = parseDataKey(process.env.DATA_KEY, 'DATA_KEY');
+const DATA_KEYS_OLD = String(process.env.DATA_KEY_OLD || '')
+  .split(',').map((s, i) => parseDataKey(s, 'DATA_KEY_OLD[' + i + ']')).filter(Boolean);
+const ALL_DATA_KEYS = (DATA_KEY ? [DATA_KEY] : []).concat(DATA_KEYS_OLD);
+
+function encryptionOn() { return !!DATA_KEY; }
+
+/* Is this stored value one of our envelopes rather than a document? */
+function isEncrypted(v) {
+  return !!v && typeof v === 'object' && !Array.isArray(v) && v.mmenc === 1 &&
+    typeof v.ct === 'string' && typeof v.iv === 'string';
+}
+
+/* Returns what should go into the JSONB column, as a string ready for pg. */
+function sealDocument(obj) {
+  if (!DATA_KEY) return JSON.stringify(obj);
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv('aes-256-gcm', DATA_KEY.key, iv);
+  const body = Buffer.concat([
+    cipher.update(Buffer.from(JSON.stringify(obj), 'utf8')),
+    cipher.final()
+  ]);
+  return JSON.stringify({
+    mmenc: 1,
+    kid: DATA_KEY.kid,
+    iv: iv.toString('base64'),
+    /* Ciphertext and the 16-byte tag together, so one field carries both. */
+    ct: Buffer.concat([body, cipher.getAuthTag()]).toString('base64')
+  });
+}
+
+/* The inverse, tolerant of a row written before the key existed. */
+function openDocument(stored) {
+  if (!isEncrypted(stored)) return stored;          /* plain, from before */
+  if (!ALL_DATA_KEYS.length) {
+    console.error('money-manager crypto: a stored document is encrypted but no DATA_KEY is configured.');
+    throw appError(503, 'data_key_missing',
+      'This deployment cannot read your data because its encryption key is not configured. ' +
+      'Nothing has been lost — ask the administrator to restore it.',
+      'DATA_KEY is unset or invalid but stored rows are encrypted.');
+  }
+  /* Try the key that wrote it, then the rest — that is what makes rotation
+     possible without rewriting every row first. */
+  const ordered = ALL_DATA_KEYS.slice().sort(function (a, b) {
+    return (b.kid === stored.kid ? 1 : 0) - (a.kid === stored.kid ? 1 : 0);
+  });
+  const raw = Buffer.from(stored.ct, 'base64');
+  if (raw.length < 17) throw appError(500, 'data_corrupt', 'A stored record could not be read.');
+  const body = raw.slice(0, raw.length - 16);
+  const tag = raw.slice(raw.length - 16);
+  const iv = Buffer.from(stored.iv, 'base64');
+  for (let i = 0; i < ordered.length; i++) {
+    try {
+      const d = crypto.createDecipheriv('aes-256-gcm', ordered[i].key, iv);
+      d.setAuthTag(tag);
+      const out = Buffer.concat([d.update(body), d.final()]);
+      return JSON.parse(out.toString('utf8'));
+    } catch (e) { /* wrong key, or the row was tampered with — try the next */ }
+  }
+  console.error('money-manager crypto: no configured key could decrypt a stored document (kid ' +
+    String(stored.kid) + ').');
+  throw appError(503, 'data_key_mismatch',
+    'This deployment cannot read your data with the encryption key it has. ' +
+    'Nothing has been lost — ask the administrator to check it.',
+    'No key matched kid ' + String(stored.kid));
+}
+
 /* --------------------------------------------------------- who may sign up
 
    Three explicit states, so the answer never has to be inferred:
@@ -1611,7 +1718,7 @@ async function authGoogle(client, req, res) {
       await query(client,
         `INSERT INTO mm_state (user_id, data, rev, device, updated_at)
          VALUES ($1,$2,1,$3, now()) ON CONFLICT (user_id) DO NOTHING`,
-        [userId, JSON.stringify(startingDocument(false)),
+        [userId, sealDocument(startingDocument(false)),
           String(req.headers['x-device'] || 'unknown').slice(0, 120)]);
     }
     var sessionToken = await issueSession(client, userId, req.headers['x-device']);
@@ -1634,7 +1741,7 @@ async function authGoogle(client, req, res) {
 async function latestPayload(client, userId) {
   const { rows } = await query(client,
     'SELECT payload FROM mm_snapshot WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1', [userId]);
-  return rows.length ? rows[0].payload : null;
+  return rows.length ? openDocument(rows[0].payload) : null;
 }
 
 /* Same signed convention as the app: assets positive, liabilities negative,
@@ -1858,6 +1965,10 @@ async function handleRequest(req, res) {
         ? 'This database is ' + encoding + ', not UTF8, so it cannot store the ₹ sign. Recreate it with UTF8 encoding.'
         : null,
       authSecretSet: !!(process.env.AUTH_SECRET || '').trim(),
+      /* Whether books are sealed before they reach the database. Names no
+         key and reveals nothing about its value. */
+      dataEncryption: encryptionOn() ? 'aes-256-gcm' : 'off',
+      dataKeysLoaded: ALL_DATA_KEYS.length,
       /* The app hides the "forgot password" link unless this is true, rather
          than offering something the deployment cannot do. */
       passwordReset: mailConfigured(),
@@ -1975,7 +2086,7 @@ async function handleRequest(req, res) {
           await query(client,
             `INSERT INTO mm_state (user_id, data, rev, device, updated_at)
              VALUES ($1,$2,1,$3, now())`,
-            [id, JSON.stringify(startDoc), String(req.headers['x-device'] || 'unknown').slice(0, 120)]);
+            [id, sealDocument(startDoc), String(req.headers['x-device'] || 'unknown').slice(0, 120)]);
           token = await issueSession(client, id, req.headers['x-device']);
           await query(client, 'COMMIT', []);
         } catch (err) {
@@ -2312,7 +2423,7 @@ async function handleRequest(req, res) {
         const st = await query(client, 'SELECT data, rev, updated_at, device FROM mm_state WHERE user_id = $1', [user.id]);
         if (!st.rows.length) return send(res, 200, { rev: 0, data: null });
         return send(res, 200, {
-          rev: Number(st.rows[0].rev), data: st.rows[0].data,
+          rev: Number(st.rows[0].rev), data: openDocument(st.rows[0].data),
           updatedAt: st.rows[0].updated_at, device: st.rows[0].device
         });
       }
@@ -2336,13 +2447,17 @@ async function handleRequest(req, res) {
           });
         }
         const nextRev = serverRev + 1;
+        /* The plaintext JSON is still what size, checksum and the row count
+           describe — they are facts about the document, not about how it is
+           stored — but what goes into the column is the sealed form. */
         const json = JSON.stringify(data);
+        const sealed = sealDocument(data);
         await query(client,
           `INSERT INTO mm_state (user_id, data, rev, device, updated_at)
            VALUES ($1,$2,$3,$4, now())
            ON CONFLICT (user_id) DO UPDATE SET data = excluded.data, rev = excluded.rev,
              device = excluded.device, updated_at = excluded.updated_at`,
-          [user.id, json, nextRev, device]);
+          [user.id, sealed, nextRev, device]);
         /* Automatic version history: keep a snapshot if the last one is old,
            because there is no copy in the browser to fall back on. */
         const last = await query(client,
@@ -2353,7 +2468,7 @@ async function handleRequest(req, res) {
           await query(client,
             `INSERT INTO mm_snapshot (id, user_id, label, device, byte_size, txn_count, checksum, payload, created_at)
              VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
-            [uid(), user.id, 'automatic', device, Buffer.byteLength(json), data.txns.length, sha(json), json, nowIso()]
+            [uid(), user.id, 'automatic', device, Buffer.byteLength(json), data.txns.length, sha(json), sealed, nowIso()]
           ).catch(() => {});
           await query(client,
             `DELETE FROM mm_snapshot WHERE user_id = $1 AND id NOT IN (
@@ -2411,7 +2526,7 @@ async function handleRequest(req, res) {
           await query(client,
             `INSERT INTO mm_snapshot (id, user_id, label, device, byte_size, txn_count, checksum, payload, created_at)
              VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
-            [snap.id, user.id, snap.label, snap.device, snap.bytes, snap.txns, snap.checksum, json, snap.createdAt]);
+            [snap.id, user.id, snap.label, snap.device, snap.bytes, snap.txns, snap.checksum, sealDocument(payload), snap.createdAt]);
           await query(client,
             `DELETE FROM mm_snapshot WHERE user_id = $1 AND id NOT IN (
                SELECT id FROM mm_snapshot WHERE user_id = $1 ORDER BY created_at DESC LIMIT $2)`,
@@ -2443,7 +2558,7 @@ async function handleRequest(req, res) {
            VALUES ($1,'pull',$2,$3,$4,'ok',$5)`,
           [user.id, device, row.txn_count, row.byte_size, nowIso()]);
         return send(res, 200, {
-          id: row.id, createdAt: row.created_at, checksum: row.checksum, payload: row.payload
+          id: row.id, createdAt: row.created_at, checksum: row.checksum, payload: openDocument(row.payload)
         });
       }
 
@@ -2454,7 +2569,8 @@ async function handleRequest(req, res) {
           [user.id, id]);
         if (!rows.length) return send(res, 404, { error: 'Snapshot not found.' });
         return send(res, 200, {
-          id: rows[0].id, createdAt: rows[0].created_at, checksum: rows[0].checksum, payload: rows[0].payload
+          id: rows[0].id, createdAt: rows[0].created_at, checksum: rows[0].checksum,
+          payload: openDocument(rows[0].payload)
         });
       }
 
