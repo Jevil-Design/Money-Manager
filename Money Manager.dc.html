@@ -1408,6 +1408,80 @@ function mmPad(n) { return String(n).padStart(2, '0'); }
 function mmIso(d) { return d.getFullYear() + '-' + mmPad(d.getMonth() + 1) + '-' + mmPad(d.getDate()); }
 function mmParse(s) { var p = String(s || '').split('-'); return new Date(+p[0] || 2026, (+p[1] || 1) - 1, +p[2] || 1); }
 function mmDmy(s) { var p = String(s || '').split('-'); return p.length === 3 ? p[2] + '-' + p[1] + '-' + p[0] : String(s || ''); }
+var MM_MON = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+/* "25 Sep 2026" — for the few places a date is read as prose rather than
+   scanned in a column. */
+function mmNiceDate(iso) {
+  var s = String(iso == null ? '' : iso);
+  /* Match the shape, not just the hyphen count: "not-a-date" splits into
+     three parts too, and produced "NaN undefined not". */
+  var m = s.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!m) return s;
+  return String(+m[3]) + ' ' + (MM_MON[(+m[2]) - 1] || m[2]) + ' ' + m[1];
+}
+function mmDaysBetween(from, to) {
+  return Math.round((mmParse(to).getTime() - mmParse(from).getTime()) / 86400000);
+}
+
+/* ---------------------------------------------------------------------------
+   A credit card's billing cycle, worked out from two days of the month and
+   today's date. Pure: no account, no transactions, so the Add-account dialog
+   can show what a statement day and a due day actually mean before the card
+   exists, and cardStateAt() can use the same answer afterwards.
+
+   The rules, which are how card issuers actually work:
+     - the cycle closes on stmtDay; spending after that belongs to the NEXT
+       statement, not the one that just closed
+     - a due day AFTER the statement day falls in the same month (statement
+       the 5th, due the 25th). A due day on or before it falls in the next
+       month (statement the 25th, due the 15th) — which is the common case
+     - days above 28 are pulled back to 28, because the 29th, 30th and 31st do
+       not exist in every month and a cycle that silently skips February is
+       worse than one that closes three days early
+   --------------------------------------------------------------------------- */
+function mmCardCycle(stmtDayRaw, dueDayRaw, asOf) {
+  var wantStmt = parseInt(stmtDayRaw, 10);
+  var wantDue = parseInt(dueDayRaw, 10);
+  var stmtDay = Math.min(28, Math.max(1, isFinite(wantStmt) ? wantStmt : 25));
+  var dueDay = Math.min(28, Math.max(1, isFinite(wantDue) ? wantDue : 15));
+  var today = asOf || mmIso(new Date());
+  var d = mmParse(today);
+  var y = d.getFullYear(), m = d.getMonth();
+  /* Before the statement day, the statement that "last" closed was last
+     month's. */
+  if (d.getDate() < stmtDay) m -= 1;
+
+  var lastStmt = mmIso(new Date(y, m, stmtDay));
+  var prevStmt = mmIso(new Date(y, m - 1, stmtDay));
+  var nextStmt = mmIso(new Date(y, m + 1, stmtDay));
+  var dueFor = function (mm) {
+    return mmIso(new Date(y, mm + (dueDay > stmtDay ? 0 : 1), dueDay));
+  };
+  var ls = mmParse(lastStmt);
+  var cycleStart = mmIso(new Date(ls.getFullYear(), ls.getMonth(), ls.getDate() + 1));
+
+  return {
+    stmtDay: stmtDay, dueDay: dueDay, today: today,
+    /* Was either day pulled back to 28? The dialog says so rather than
+       quietly changing what was typed. */
+    stmtClamped: isFinite(wantStmt) && wantStmt !== stmtDay,
+    dueClamped: isFinite(wantDue) && wantDue !== dueDay,
+    previousStatement: prevStmt,
+    lastStatement: lastStmt,
+    nextStatement: nextStmt,
+    /* The cycle money is going into right now. */
+    cycleStart: cycleStart,
+    cycleEnd: nextStmt,
+    /* What the statement that already closed is due on... */
+    dueDate: dueFor(m),
+    /* ...and what the cycle now open will be due on. */
+    nextDueDate: dueFor(m + 1),
+    daysToStatement: mmDaysBetween(today, nextStmt),
+    daysToDue: mmDaysBetween(today, dueFor(m)),
+    /* Breathing space between a statement closing and having to pay it. */
+    graceDays: mmDaysBetween(nextStmt, dueFor(m + 1))
+  };
+}
 function mmAddM(s, n) { var d = mmParse(s); d.setMonth(d.getMonth() + n); return mmIso(d); }
 function mmInr(n, noSym) {
   var v = +n; if (!isFinite(v)) v = 0;
@@ -3055,17 +3129,13 @@ class Component extends DCLogic {
   cardStateAt(a, asOf) {
     var db = this.state.db;
     var today = asOf || mmIso(new Date());
-    var stmtDay = Math.min(28, Math.max(1, +a.stmtDay || 25));
-    var dueDay = Math.min(28, Math.max(1, +a.dueDay || 15));
-    var d = mmParse(today);
-    /* Last statement that has already been generated. */
-    var y = d.getFullYear(), m = d.getMonth();
-    if (d.getDate() < stmtDay) m -= 1;
-    var lastStmt = mmIso(new Date(y, m, stmtDay));
-    var prevStmt = mmIso(new Date(y, m - 1, stmtDay));
-    /* Due date falls in the month after the statement closes. */
-    var dueBase = new Date(y, m, stmtDay);
-    var due = mmIso(new Date(dueBase.getFullYear(), dueBase.getMonth() + (dueDay > stmtDay ? 0 : 1), dueDay));
+    /* One implementation of the cycle, shared with the account dialog's
+       preview, so what is shown before a card is saved is what is used
+       after it. */
+    var cyc = mmCardCycle(a.stmtDay, a.dueDay, today);
+    var lastStmt = cyc.lastStatement;      /* the statement that has closed */
+    var prevStmt = cyc.previousStatement;  /* the one before that */
+    var due = cyc.dueDate;                 /* when the closed one must be paid */
 
     var owedTotal = -this.bal(a.id).balance;      /* everything owed right now */
     var unbilled = 0, stmtSpend = 0, stmtPaid = 0, prevSpend = 0;
@@ -8397,6 +8467,34 @@ class Component extends DCLogic {
         fields.push(this.fld('Credit limit', 'text', a.limit, set('limit'), { type: 'number' }));
         fields.push(this.fld('Statement day', 'text', a.stmtDay, set('stmtDay'), { type: 'number', hint: 'day of the month the bill is generated' }));
         fields.push(this.fld('Payment due day', 'text', a.dueDay, set('dueDay'), { type: 'number', hint: 'day of the month payment is due' }));
+        /* Two days of the month are hard to picture. Turn them into the real
+           dates they produce against today, so a wrong entry is obvious here
+           rather than a month later when a bill lands early. */
+        (function () {
+          var cyc = mmCardCycle(a.stmtDay, a.dueDay);
+          var plural = function (n, word) { return n + ' ' + word + (n === 1 ? '' : 's'); };
+          var lines = [
+            'Now collecting   ' + mmNiceDate(cyc.cycleStart) + '  →  ' + mmNiceDate(cyc.cycleEnd) +
+              '   (closes in ' + plural(cyc.daysToStatement, 'day') + ')',
+            'That bill due    ' + mmNiceDate(cyc.nextDueDate) +
+              '   (' + plural(cyc.graceDays, 'day') + ' after it closes)'
+          ];
+          /* A statement that has already closed is money owed now, not next
+             month — worth saying when someone is entering a card mid-cycle. */
+          if (cyc.daysToDue >= 0) {
+            lines.push('Already closed   ' + mmNiceDate(cyc.lastStatement) +
+              '   due ' + mmNiceDate(cyc.dueDate) +
+              (cyc.daysToDue === 0 ? '   (today)' : '   (in ' + plural(cyc.daysToDue, 'day') + ')'));
+          }
+          var notes = [];
+          if (cyc.stmtClamped) notes.push('statement day set to ' + cyc.stmtDay);
+          if (cyc.dueClamped) notes.push('due day set to ' + cyc.dueDay);
+          var hint = notes.length
+            ? notes.join(' and ') + ' — days after the 28th do not exist in every month'
+            : 'worked out from today, ' + mmNiceDate(cyc.today);
+          fields.push(self.fld('Billing cycle', 'static', lines.join('\n'), null,
+            { wrap: true, hint: hint }));
+        })();
         fields.push(this.fld('Minimum due %', 'text', a.minPct, set('minPct'), { type: 'number', hint: 'usually 5' }));
         fields.push(this.fld('Interest rate % p.a.', 'text', a.rate, set('rate'), { type: 'number' }));
         fields.push(this.fld('Annual fee', 'text', a.annualFee, set('annualFee'), { type: 'number' }));
