@@ -265,7 +265,7 @@ const {
 ok('the module exports a handler', typeof api === 'function');
 
 const plain = startingDocument(false);
-ok('a plain account has the app\'s schema version', plain.schemaVersion === 4, String(plain.schemaVersion));
+ok('a plain account has the app\'s schema version', plain.schemaVersion === 5, String(plain.schemaVersion));
 ok('a plain account has no accounts', plain.accounts.length === 0);
 ok('a plain account has no transactions', plain.txns.length === 0);
 ok('a plain account has default categories', plain.categories.length === 26, String(plain.categories.length));
@@ -436,7 +436,7 @@ console.log('\nThe server\'s starting document is already current for the app');
     const label = withSamples ? 'sample book' : 'empty book';
     ok(label + ': the app needs no migration of it', !after.__migrated,
       'migrate() reported a change');
-    ok(label + ': the schema version is the app\'s own', after.schemaVersion === 4);
+    ok(label + ': the schema version is the app\'s own', after.schemaVersion === 5);
     ok(label + ': no collection was dropped or emptied',
       ['accounts', 'txns', 'categories', 'budgets', 'recurring', 'loans', 'bookmarks',
         'bills', 'goals', 'rules', 'recons', 'views', 'loanEvents'].every(
@@ -501,7 +501,7 @@ ok('every financial table is keyed to a user and cascades',
   }));
 ok('email is uniquely indexed, case-insensitively',
   /CREATE UNIQUE INDEX IF NOT EXISTS \S+ ON mm_user \(lower\(email\)\)/.test(SCHEMA));
-ok('the app document schema version matches the app', MM_SCHEMA === 4);
+ok('the app document schema version matches the app', MM_SCHEMA === 5);
 
 console.log('\nPassword hashing');
 (async () => {

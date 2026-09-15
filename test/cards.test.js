@@ -398,7 +398,7 @@ console.log('\nA card set up before this existed is not disturbed');
   const before = c.cardStateAt(Object.assign({}, old), '2026-09-14');
   c.state.db.accounts = [old];
   c.state.db.txns = [];
-  const db = c.migrate({ accounts: [Object.assign({}, old)], txns: [], schemaVersion: 4 });
+  const db = c.migrate({ accounts: [Object.assign({}, old)], txns: [], schemaVersion: 5 });
   const migrated = db.accounts[0];
   ok('the migration fills in the month offset', migrated.dueNextMonth === true,
     String(migrated.dueNextMonth));

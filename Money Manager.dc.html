@@ -1698,9 +1698,14 @@ var MM_ACCT_KIND = {
 };
 function mmIsLiability(type) { return MM_ACCT_KIND[type] === 'liability'; }
 var MM_PAY = ['Cash', 'UPI', 'Bank Transfer', 'Debit Card', 'Credit Card', 'NEFT', 'RTGS', 'IMPS'];
-var MM_TABS = ['Dashboard', 'Ledger', 'Accounts', 'Budget', 'Bills', 'Recurring', 'Cards', 'Loans', 'Goals', 'Calendar', 'Reports', 'Reconcile', 'Settings'];
+var MM_TABS = ['Dashboard', 'Ledger', 'Accounts', 'Budget', 'Bills', 'Recurring', 'Cards', 'Loans', 'Investments', 'Calendar', 'Reports', 'Reconcile', 'Settings'];
 /* Older builds shipped different tab names; keep saved/props values working. */
-var MM_TAB_ALIAS = { Bills: 'Ledger', Assets: 'Accounts', Transactions: 'Ledger' };
+/* Goals became Investments. The saved tab name still resolves so a stored
+   preference does not drop someone on the Dashboard; the goals themselves are
+   untouched and are shown inside Investments as savings targets, because a
+   goal is not an investment and converting one into the other would invent
+   holdings nobody bought. */
+var MM_TAB_ALIAS = { Bills: 'Ledger', Assets: 'Accounts', Transactions: 'Ledger', Goals: 'Investments' };
 var MM_PRESETS = ['Today', 'Yesterday', 'This Week', 'Last Week', 'This Month', 'Last Month', 'This Quarter', 'This Year', 'Last Year', 'Custom'];
 var MM_COLS = {
   date: { label: 'Date', w: 90, al: 'left' },
@@ -1725,14 +1730,67 @@ var MM_COLS = {
    offered but left off until the user asks for it. */
 var MM_COLS_DEFAULT = ['date', 'account', 'type', 'category', 'sub', 'contents', 'debit', 'credit', 'transfer', 'flags', 'details'];
 var MM_ROWH_DEFAULT = 32;
-var MM_SCHEMA = 4;                       /* bump whenever migrate() gains a step */
+var MM_SCHEMA = 5;                       /* bump whenever migrate() gains a step */
 var MM_FREQ = ['daily', 'weekly', 'biweekly', 'monthly', 'quarterly', 'halfyearly', 'yearly'];
 var MM_FREQ_LABEL = { daily: 'Daily', weekly: 'Weekly', biweekly: 'Fortnightly', monthly: 'Monthly', quarterly: 'Quarterly', halfyearly: 'Half-yearly', yearly: 'Yearly' };
 var MM_MATCH = ['contains', 'starts', 'ends', 'exact', 'regex'];
 var MM_MATCH_LABEL = { contains: 'Contains', starts: 'Starts with', ends: 'Ends with', exact: 'Exact match', regex: 'Regular expression' };
 /* Collections every db must have.  migrate() backfills any that are missing so
    that a backup written by an older build can never crash a newer one. */
-var MM_COLLECTIONS = ['accounts', 'txns', 'categories', 'budgets', 'recurring', 'loans', 'bookmarks', 'bills', 'goals', 'rules', 'recons', 'views', 'loanEvents'];
+var MM_COLLECTIONS = ['accounts', 'txns', 'categories', 'budgets', 'recurring', 'loans', 'bookmarks', 'bills', 'goals', 'rules', 'recons', 'views', 'loanEvents',
+  /* Investments. Three collections rather than one nested structure, for the
+     same reason txns are not nested inside accounts: a flat list is what
+     filtering, sorting and duplicate detection can work on.
+       investments  what is held, and what it is currently worth
+       invTxns      every purchase, withdrawal, dividend and maturity
+       sips         the standing instructions that create invTxns over time */
+  'investments', 'invTxns', 'sips'];
+
+/* What can be held. Sub-types matter because the maths differs: a deposit
+   accrues to a known maturity value, a fund is units times NAV, gold is a
+   weight times a rate. */
+var MM_INV_GROUPS = [
+  { key: 'mf', label: 'Mutual Funds', unitised: true, types: [
+    'SIP', 'Lump Sum', 'ELSS', 'Index Fund', 'Equity Fund', 'Debt Fund',
+    'Hybrid Fund', 'Liquid Fund', 'Other Mutual Fund'] },
+  { key: 'deposit', label: 'Deposits', unitised: false, types: [
+    'Fixed Deposit', 'Recurring Deposit', 'Tax Saver FD', 'Corporate Deposit', 'Other Deposit'] },
+  { key: 'gold', label: 'Gold', unitised: true, types: [
+    'Physical Gold', 'Digital Gold', 'Gold ETF', 'Sovereign Gold Bond'] },
+  { key: 'market', label: 'Market', unitised: true, types: [
+    'Stocks', 'Bonds', 'ETF', 'REIT', 'InvIT', 'Other Market Investment'] },
+  { key: 'longterm', label: 'Long Term', unitised: false, types: [
+    'PPF', 'NPS', 'EPF', 'NSC', 'KVP', 'Post Office Scheme', 'Insurance / ULIP'] },
+  { key: 'other', label: 'Other', unitised: false, types: ['Other Investment'] }
+];
+var MM_INV_TYPE_GROUP = (function () {
+  var m = {};
+  MM_INV_GROUPS.forEach(function (g) { g.types.forEach(function (t) { m[t] = g.key; }); });
+  return m;
+})();
+function mmInvGroupOf(type) { return MM_INV_TYPE_GROUP[type] || 'other'; }
+function mmInvIsUnitised(type) {
+  var key = mmInvGroupOf(type);
+  for (var i = 0; i < MM_INV_GROUPS.length; i++) if (MM_INV_GROUPS[i].key === key) return MM_INV_GROUPS[i].unitised;
+  return false;
+}
+
+/* Which investment transactions put money IN, and which take it back out.
+   This one list decides cash-flow direction everywhere — the ledger entry,
+   the cost basis and the XIRR flows — so they cannot drift apart. */
+var MM_INV_IN = ['buy', 'sip', 'lumpsum', 'additional', 'reinvestment'];
+var MM_INV_OUT = ['withdrawal', 'partial', 'sell', 'maturity', 'dividend', 'interest'];
+var MM_INV_TXN_TYPES = MM_INV_IN.concat(MM_INV_OUT);
+var MM_INV_TXN_LABEL = {
+  buy: 'Buy', sip: 'SIP', lumpsum: 'Lump sum', additional: 'Additional investment',
+  reinvestment: 'Reinvestment', withdrawal: 'Withdrawal', partial: 'Partial withdrawal',
+  sell: 'Sell', maturity: 'Maturity', dividend: 'Dividend', interest: 'Interest'
+};
+function mmInvIsInflow(type) { return MM_INV_IN.indexOf(String(type)) >= 0; }
+/* Money leaving the holding, but not a payout that leaves units alone. */
+function mmInvReducesUnits(type) {
+  return type === 'withdrawal' || type === 'partial' || type === 'sell' || type === 'maturity';
+}
 
 function mmSeed() {
   var now = Date.now();
@@ -1862,6 +1920,10 @@ function mmSeed() {
     accounts: accounts, txns: txns, categories: categories, budgets: budgets, recurring: recurring,
     loans: loans, bookmarks: bookmarks, bills: bills, goals: goals, rules: rules,
     recons: [], views: [], loanEvents: [],
+    /* Investments start empty even in the sample book: example holdings
+       would be fabricated market data, which is exactly what must not be
+       invented. */
+    investments: [], invTxns: [], sips: [],
     tags: ['#office', '#travel', '#family', '#salary', '#reimbursable'],
     payments: MM_PAY.slice(),
     settings: {
@@ -3330,6 +3392,160 @@ class Component extends DCLogic {
   }
 
   /* Assets minus liabilities, with liabilities counted at what is owed. */
+  /* -------------------------------------------------------------------------
+     INVESTMENTS
+
+     Money moving into an investment is a TRANSFER, never an expense. Buying
+     ₹10,000 of a fund does not make you ₹10,000 poorer — it moves ₹10,000
+     from one account you own to another. Treating it as spending would double
+     count it: once as an expense, and again as an asset you still hold.
+
+     So an investment is backed by an ordinary account (type investment, fd or
+     gold) and every purchase is an ordinary transfer into it. That is not a
+     shortcut — it means the ledger, balances, reports, reconciliation and net
+     worth all handle investments correctly without knowing they exist.
+
+     The account balance is therefore the COST BASIS: what was put in, less
+     what was taken out. What it is WORTH today is a separate number, because
+     the market does not tell the ledger anything. The difference between the
+     two is unrealised gain, and that is what net worth has to add.
+     ------------------------------------------------------------------------- */
+
+  inv(id) {
+    var list = this.state.db.investments || [];
+    for (var i = 0; i < list.length; i++) if (list[i].id === id) return list[i];
+    return null;
+  }
+  invTxnsFor(id) {
+    return (this.state.db.invTxns || []).filter(function (t) { return t.investmentId === id; });
+  }
+
+  /* What an investment cost, and what is still in it, from its own
+     transactions. Independent of the account so an investment that is not
+     backed by one still reports correctly. */
+  invCostBasis(id) {
+    var paid = 0, taken = 0;
+    this.invTxnsFor(id).forEach(function (t) {
+      var amt = Math.abs(+t.amount || 0);
+      if (!isFinite(amt)) return;
+      if (mmInvIsInflow(t.type)) paid += amt;
+      else if (mmInvReducesUnits(t.type)) taken += amt;
+      /* A dividend or interest payout is a return, not a withdrawal of
+         capital, so it does not reduce what was invested. */
+    });
+    return { paid: paid, withdrawn: taken, net: Math.max(0, paid - taken) };
+  }
+
+  invUnits(id) {
+    var units = 0;
+    this.invTxnsFor(id).forEach(function (t) {
+      var u = +t.units || 0;
+      if (!isFinite(u) || u <= 0) return;
+      if (mmInvIsInflow(t.type)) units += u;
+      else if (mmInvReducesUnits(t.type)) units -= u;
+    });
+    return Math.max(0, Math.round(units * 10000) / 10000);
+  }
+
+  /* What it is worth now.
+     Unitised holdings are units times the latest price we have. Everything
+     else carries a value someone entered, or its principal if not yet valued.
+     Never invented: if there is no price and no entered value, the cost basis
+     stands, and the UI says the value has not been updated. */
+  invValue(inv) {
+    if (!inv) return 0;
+    var cost = this.invCostBasis(inv.id).net;
+    if (mmInvIsUnitised(inv.type)) {
+      var units = this.invUnits(inv.id);
+      var price = +inv.currentNav || 0;
+      if (units > 0 && price > 0) return Math.round(units * price * 100) / 100;
+    }
+    var manual = +inv.currentValue;
+    if (isFinite(manual) && manual > 0) return manual;
+    return cost;
+  }
+
+  /* One investment, fully worked out. Every screen reads this rather than
+     recomputing, so the dashboard and the portfolio cannot disagree. */
+  invState(inv) {
+    var self = this;
+    if (!inv) return null;
+    return this.cache('inv:' + inv.id, function () {
+      var basis = self.invCostBasis(inv.id);
+      var value = self.invValue(inv);
+      var units = mmInvIsUnitised(inv.type) ? self.invUnits(inv.id) : 0;
+      var txns = self.invTxnsFor(inv.id);
+      var xirr = mmXirr(mmInvestmentFlows(txns, value));
+      var avg = units > 0 && basis.net > 0 ? basis.net / units : 0;
+      return {
+        id: inv.id,
+        invested: basis.net,
+        paid: basis.paid,
+        withdrawn: basis.withdrawn,
+        value: value,
+        units: units,
+        avgPrice: Math.round(avg * 10000) / 10000,
+        gain: mmGainLoss(basis.net, value),
+        returnPct: mmReturnPct(basis.net, value),
+        /* null when the cash flows cannot support one — the caller shows the
+           simple return and says so, rather than printing a made-up rate. */
+        xirr: xirr,
+        group: mmInvGroupOf(inv.type),
+        txnCount: txns.length
+      };
+    });
+  }
+
+  /* The whole portfolio, and the same figures rolled up by group. */
+  portfolio() {
+    var self = this;
+    return this.cache('portfolio', function () {
+      var rows = [], totals = { invested: 0, value: 0, gain: 0 }, byGroup = {};
+      var allFlows = [];
+      (self.state.db.investments || []).forEach(function (inv) {
+        if (inv.status === 'closed' || inv.status === 'sold') return;
+        var st = self.invState(inv);
+        rows.push({ inv: inv, st: st });
+        totals.invested += st.invested;
+        totals.value += st.value;
+        var g = byGroup[st.group] || (byGroup[st.group] = { invested: 0, value: 0, gain: 0, count: 0 });
+        g.invested += st.invested; g.value += st.value; g.count++;
+        /* Portfolio XIRR is every holding's flows together, not an average of
+           their rates — averaging rates over different amounts and periods is
+           simply the wrong number. */
+        self.invTxnsFor(inv.id).forEach(function (t) { allFlows.push(t); });
+      });
+      totals.gain = mmGainLoss(totals.invested, totals.value);
+      totals.returnPct = mmReturnPct(totals.invested, totals.value);
+      totals.xirr = mmXirr(mmInvestmentFlows(allFlows, totals.value));
+      Object.keys(byGroup).forEach(function (k) {
+        byGroup[k].gain = mmGainLoss(byGroup[k].invested, byGroup[k].value);
+        byGroup[k].returnPct = mmReturnPct(byGroup[k].invested, byGroup[k].value);
+        byGroup[k].share = totals.value > 0 ? (byGroup[k].value / totals.value) * 100 : 0;
+      });
+      return { rows: rows, totals: totals, byGroup: byGroup };
+    });
+  }
+
+  /* What the ledger does not know: the difference between what investments
+     cost and what they are worth. Added to net worth so the figure reflects
+     the market rather than only the money that moved. */
+  unrealisedGain() {
+    var self = this;
+    return this.cache('unrealised', function () {
+      var total = 0;
+      (self.state.db.investments || []).forEach(function (inv) {
+        if (inv.status === 'closed' || inv.status === 'sold') return;
+        /* Only where an account already carries the cost basis, or the sum
+           would count the whole holding twice. */
+        var st = self.invState(inv);
+        if (inv.accountId && self.acct(inv.accountId)) total += st.value - st.invested;
+        else total += st.value;
+      });
+      return Math.round(total * 100) / 100;
+    });
+  }
+
   netWorthParts() {
     var self = this;
     return this.cache('nw', function () {
@@ -3348,7 +3564,16 @@ class Component extends DCLogic {
         liab += st.outstanding;
         byType.loan = (byType.loan || 0) + st.outstanding;
       });
-      return { assets: assets, liabilities: liab, net: assets - liab, byType: byType };
+      /* Investments are already in `assets` at what they cost, because their
+         account holds the transfers that bought them. What the ledger cannot
+         know is what they are worth now, so the difference is added here. */
+      var unrealised = self.unrealisedGain();
+      assets += unrealised;
+      byType.investment = (byType.investment || 0) + unrealised;
+      return {
+        assets: assets, liabilities: liab, net: assets - liab,
+        byType: byType, unrealised: unrealised
+      };
     });
   }
   netWorth() { return this.netWorthParts().net; }

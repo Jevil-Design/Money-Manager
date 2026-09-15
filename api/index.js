@@ -1658,7 +1658,7 @@ function resetEmailBody(name, code, link) {
    MM_SCHEMA must track the app's own constant (currently 4) so migrate() in
    the browser recognises the document as current and does not rewrite it.
    ------------------------------------------------------------------------- */
-const MM_SCHEMA = 4;
+const MM_SCHEMA = 5;
 const MM_PAY = ['Cash', 'UPI', 'Bank Transfer', 'Debit Card', 'Credit Card', 'NEFT', 'RTGS', 'IMPS'];
 
 /* The same id shape the app generates, so nothing downstream has to care
@@ -1780,6 +1780,9 @@ function startingDocument(withSamples) {
     accounts: [], txns: [], categories: categories, budgets: [], recurring: [],
     loans: [], bookmarks: [], bills: [], goals: [], rules: rules,
     recons: [], views: [], loanEvents: [],
+    /* Investments: empty for a new account, but present, so the app does not
+       have to migrate a brand-new document just to add three arrays. */
+    investments: [], invTxns: [], sips: [],
     tags: ['#office', '#travel', '#family', '#salary', '#reimbursable'],
     payments: MM_PAY.slice(),
     settings: {
