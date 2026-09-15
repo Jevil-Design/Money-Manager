@@ -590,6 +590,347 @@ function withFundSearch(c, result) {
       JSON.stringify(v.tableRows[0].cells.map((x) => x.text)));
   }
 
+  /* ------------------------------------------------------------------ SIPs */
+
+  /* A book with one fund already held, which is what a SIP buys into. */
+  function sipBook(navHistory) {
+    const c = withFundSearch(book());
+    c.openInvestment('add', {});
+    c.invPickFund(PPFAS);
+    c.dlgSet({ buyDate: '2026-01-15', buyAmount: 10000 });
+    c.saveInvestment();
+    const inv = c.state.db.investments[0];
+    c.api = function (url) {
+      if (url.indexOf('/history') >= 0) {
+        if (navHistory === 'fail') return Promise.reject(new Error('provider down'));
+        return Promise.resolve({
+          schemeCode: '122639',
+          history: navHistory || [
+            { date: '2026-06-10', nav: 85 },
+            { date: '2026-06-12', nav: 86 },   /* Friday */
+            { date: '2026-06-15', nav: 88 },   /* Monday */
+            { date: '2026-07-15', nav: 90 }
+          ]
+        });
+      }
+      return Promise.resolve({ funds: [PPFAS], count: 1, catalogue: { stale: false } });
+    };
+    return { c, inv };
+  }
+
+  function addSip(c, inv, over) {
+    c.openSip('add');
+    c.dlgSet(Object.assign({
+      investmentId: inv.id, amount: 5000, freq: 'monthly',
+      start: '2026-06-15', accountId: 'bank'
+    }, over || {}));
+    c.saveSip();
+    return c.state.db.sips[c.state.db.sips.length - 1];
+  }
+
+  console.log('\nSetting up a SIP commits nothing');
+  {
+    const { c, inv } = sipBook();
+    const txnsBefore = c.state.db.txns.length;
+    const s = addSip(c, inv);
+
+    ok('the SIP is stored', !!s && s.investmentId === inv.id);
+    ok('it owes its first instalment on its start date', s.next === '2026-06-15', s.next);
+    ok('nothing has been recorded against it yet', (+s.posted || 0) === 0, String(s.posted));
+    ok('no money moved', c.state.db.txns.length === txnsBefore,
+      String(c.state.db.txns.length - txnsBefore));
+    ok('and no units were bought', c.invUnits(inv.id) === c.invState(inv).units);
+    ok('the bank is untouched by setting it up', c.balances().bank.balance === 490000,
+      String(c.balances().bank.balance));
+  }
+
+  console.log('\nWhat a SIP refuses');
+  {
+    const { c, inv } = sipBook();
+    c.openSip('add');
+    c.dlgSet({ investmentId: inv.id, amount: 0, start: '2026-06-15', accountId: 'bank' });
+    c.saveSip();
+    ok('a zero instalment is refused', c.state.db.sips.length === 0);
+
+    c.dlgSet({ amount: 5000, end: '2026-01-01' });
+    c.saveSip();
+    ok('an end date before the start is refused', c.state.db.sips.length === 0);
+
+    c.dlgSet({ end: '', accountId: 'nonexistent' });
+    c.saveSip();
+    ok('an account that is not there is refused', c.state.db.sips.length === 0);
+
+    c.dlgSet({ accountId: 'bank', investmentId: 'gone' });
+    c.saveSip();
+    ok('an investment that is not there is refused', c.state.db.sips.length === 0);
+
+    c.dlgSet({ investmentId: inv.id, freq: 'hourly' });
+    c.saveSip();
+    ok('an unknown frequency falls back to monthly rather than being stored',
+      c.state.db.sips.length === 1 && c.state.db.sips[0].freq === 'monthly',
+      c.state.db.sips[0] && c.state.db.sips[0].freq);
+  }
+
+  console.log('\nMissed instalments are all owed, not just the last one');
+  {
+    const { c, inv } = sipBook();
+    const s = addSip(c, inv, { start: '2026-06-15' });
+    const pending = c.sipPending(s, '2026-09-15');
+    ok('four instalments are owed by 15 September', pending.length === 4,
+      JSON.stringify(pending));
+    ok('they are the right dates',
+      pending.join(',') === '2026-06-15,2026-07-15,2026-08-15,2026-09-15', pending.join(','));
+
+    /* A paused SIP owes nothing. */
+    c.toggleSip(s);
+    ok('a paused SIP owes nothing',
+      c.sipPending(c.state.db.sips[0], '2026-09-15').length === 0);
+    c.toggleSip(c.state.db.sips[0]);
+
+    /* An end date stops it. */
+    const s2 = addSip(c, inv, { start: '2026-06-15', end: '2026-07-20' });
+    ok('an end date stops the schedule', c.sipPending(s2, '2026-09-15').length === 2,
+      JSON.stringify(c.sipPending(s2, '2026-09-15')));
+
+    /* A fixed number of instalments stops it too. */
+    const s3 = addSip(c, inv, { start: '2026-06-15', count: 2 });
+    ok('a fixed count stops the schedule', c.sipPending(s3, '2026-09-15').length === 2,
+      String(c.sipPending(s3, '2026-09-15').length));
+
+    /* Frequencies. */
+    const q = addSip(c, inv, { start: '2026-03-15', freq: 'quarterly' });
+    ok('a quarterly SIP owes three by September',
+      c.sipPending(q, '2026-09-15').length === 3, JSON.stringify(c.sipPending(q, '2026-09-15')));
+    ok('and is a third of its amount each month',
+      Math.abs(c.sipMonthly(q) - 5000 / 3) < 0.01, String(c.sipMonthly(q)));
+    const f = addSip(c, inv, { start: '2026-09-01', freq: 'biweekly' });
+    ok('a fortnightly SIP counts more than once a month',
+      c.sipMonthly(f) > 5000, String(c.sipMonthly(f)));
+  }
+
+  console.log('\nA step-up SIP rises on schedule and not before');
+  {
+    const { c, inv } = sipBook();
+    const s = addSip(c, inv, { start: '2025-04-01', amount: 5000, stepUpPct: 10, stepUpEvery: 12 });
+    ok('the first year is the base amount', c.sipAmountOn(s, '2026-03-31') === 5000,
+      String(c.sipAmountOn(s, '2026-03-31')));
+    ok('it steps up on the anniversary', c.sipAmountOn(s, '2026-04-01') === 5500,
+      String(c.sipAmountOn(s, '2026-04-01')));
+    ok('and compounds the year after', c.sipAmountOn(s, '2027-04-01') === 6050,
+      String(c.sipAmountOn(s, '2027-04-01')));
+    ok('a date before the SIP started is still the base',
+      c.sipAmountOn(s, '2024-01-01') === 5000, String(c.sipAmountOn(s, '2024-01-01')));
+
+    const flat = addSip(c, inv, { start: '2020-01-01', amount: 5000, stepUpPct: 0 });
+    ok('no step-up means no rise, ever', c.sipAmountOn(flat, '2030-01-01') === 5000,
+      String(c.sipAmountOn(flat, '2030-01-01')));
+  }
+
+  console.log('\nMarking an instalment paid');
+  {
+    const { c, inv } = sipBook();
+    const s = addSip(c, inv, { start: '2026-06-14' });   /* a Sunday */
+    const bankBefore = c.balances().bank.balance;
+    const unitsBefore = c.invUnits(inv.id);
+
+    c.markSipPaid(s, '2026-06-14');
+    ok('the transaction dialog opens', c.state.dlg && c.state.dlg.kind === 'invtxn');
+    ok('pre-filled with the instalment amount', c.state.dlg.data.amount === 5000,
+      String(c.state.dlg.data.amount));
+    ok('and the instalment date', c.state.dlg.data.date === '2026-06-14', c.state.dlg.data.date);
+    ok('recorded as a SIP, not an ordinary buy', c.state.dlg.data.type === 'sip',
+      c.state.dlg.data.type);
+    ok('and it knows which SIP it belongs to', c.state.dlg.data.sipId === s.id);
+    ok('the NAV lookup is announced rather than silently guessed',
+      c.state.dlg.data.navBusy === true && /looking up/i.test(c.state.dlg.data.navNote),
+      c.state.dlg.data.navNote);
+
+    await c.sipNavFor(inv, '2026-06-14');
+    ok('the NAV used is the last one published on or before that day',
+      c.state.dlg.data.nav === 86, String(c.state.dlg.data.nav));
+    ok('and the day it actually came from is stated',
+      /12 Jun|2026-06-12|Jun 2026/i.test(c.state.dlg.data.navNote), c.state.dlg.data.navNote);
+    ok('the lookup is no longer running', c.state.dlg.data.navBusy === false);
+
+    ok('the dialog renders', !!c.dlgVals().hasDlg);
+    c.saveInvTxn();
+
+    const st = c.invState(c.inv(inv.id));
+    ok('the units were worked out from that NAV',
+      Math.abs(st.units - (unitsBefore + Math.round((5000 / 86) * 10000) / 10000)) < 0.0001,
+      String(st.units));
+    ok('the bank fell by the instalment', c.balances().bank.balance === bankBefore - 5000,
+      String(c.balances().bank.balance));
+    ok('the ledger entry is a transfer',
+      c.state.db.txns[c.state.db.txns.length - 1].type === 'transfer');
+    ok('a SIP is never counted as spending',
+      c.state.db.txns.filter((t) => t.type === 'expense').length === 0);
+
+    const after = c.state.db.sips[0];
+    ok('the SIP counts one instalment recorded', (+after.posted || 0) === 1, String(after.posted));
+    ok('the date is remembered so it cannot be recorded twice',
+      (after.postedDates || []).indexOf('2026-06-14') >= 0, JSON.stringify(after.postedDates));
+    ok('and the schedule moved on a month', after.next === '2026-07-14', after.next);
+    ok('that instalment is no longer owed',
+      c.sipPending(after, '2026-06-30').length === 0,
+      JSON.stringify(c.sipPending(after, '2026-06-30')));
+    ok('the invTxn is tagged with the SIP',
+      c.state.db.invTxns[c.state.db.invTxns.length - 1].sipId === s.id);
+  }
+
+  console.log('\nA SIP that runs out stops asking');
+  {
+    const { c, inv } = sipBook();
+    const s = addSip(c, inv, { start: '2026-09-01', count: 1 });
+    c.markSipPaid(s, '2026-09-01');
+    c.dlgSet({ nav: 100 });
+    c.saveInvTxn();
+    const after = c.state.db.sips[0];
+    ok('it ends once its last instalment is recorded', after.status === 'ended', after.status);
+    ok('and owes nothing more', c.sipPending(after, '2027-01-01').length === 0);
+  }
+
+  console.log('\nNo published NAV means nothing is invented');
+  {
+    const { c, inv } = sipBook('fail');
+    const s = addSip(c, inv, { start: '2026-06-15' });
+    c.markSipPaid(s, '2026-06-15');
+    await c.sipNavFor(inv, '2026-06-15');
+    ok('the failure is stated plainly',
+      /could not be fetched/i.test(c.state.dlg.data.navNote), c.state.dlg.data.navNote);
+    ok('the lookup stops running', c.state.dlg.data.navBusy === false);
+    ok('and the SIP has still recorded nothing', (+c.state.db.sips[0].posted || 0) === 0);
+
+    /* A date earlier than anything published. */
+    const b = sipBook();
+    b.c.markSipPaid(addSip(b.c, b.inv, { start: '2026-01-05' }), '2026-01-05');
+    await b.c.sipNavFor(b.inv, '2026-01-05');
+    ok('a date before the series says so, rather than reaching forward',
+      /no nav was published/i.test(b.c.state.dlg.data.navNote), b.c.state.dlg.data.navNote);
+    ok('and leaves the NAV as it was, not zeroed or guessed',
+      b.c.state.dlg.data.nav === PPFAS.nav, String(b.c.state.dlg.data.nav));
+  }
+
+  console.log('\nSkipping an instalment moves on without moving money');
+  {
+    const { c, inv } = sipBook();
+    const s = addSip(c, inv, { start: '2026-06-15' });
+    const bankBefore = c.balances().bank.balance;
+    const txnsBefore = c.state.db.txns.length;
+    c.skipSip(s);
+    const after = c.state.db.sips[0];
+    ok('the skipped date is remembered', (after.skipped || []).indexOf('2026-06-15') >= 0,
+      JSON.stringify(after.skipped));
+    ok('the schedule moved on', after.next === '2026-07-15', after.next);
+    ok('but nothing counts as recorded', (+after.posted || 0) === 0, String(after.posted));
+    ok('no money moved', c.balances().bank.balance === bankBefore);
+    ok('and no ledger entry was made', c.state.db.txns.length === txnsBefore);
+    ok('the skipped instalment is not offered again',
+      c.sipPending(after, '2026-06-30').length === 0);
+  }
+
+  console.log('\nDeleting a SIP keeps what it bought');
+  {
+    const { c, inv } = sipBook();
+    const s = addSip(c, inv, { start: '2026-06-15' });
+    c.markSipPaid(s, '2026-06-15');
+    c.dlgSet({ nav: 88 });
+    c.saveInvTxn();
+    const investedBefore = c.invState(c.inv(inv.id)).invested;
+
+    c.deleteSip(c.state.db.sips[0]);
+    ok('it asks first', !!c.state.confirm);
+    c.state.confirm.ok();
+    ok('the SIP is gone', c.state.db.sips.length === 0);
+    ok('the instalment it bought is kept',
+      c.invState(c.inv(inv.id)).invested === investedBefore,
+      String(c.invState(c.inv(inv.id)).invested));
+    ok('and so is its ledger entry',
+      c.state.db.txns.filter((t) => t.type === 'transfer').length === 2,
+      String(c.state.db.txns.length));
+  }
+
+  console.log('\nThe SIP screen renders');
+  {
+    const { c, inv } = sipBook();
+    c.state.tab = 'Investments';
+    c.setState({ invView: 'sips' });
+
+    let v = c.investVals();
+    ok('the SIP view is reached through the tab', v.tableTitle === 'SIPs', v.tableTitle);
+    ok('it renders when empty', v.isTable === true && v.tableEmpty === true);
+    ok('and offers to add one, since a holding exists', v.emptyBtn === '+ Add SIP', v.emptyBtn);
+    ok('every panel has a value', v.panels.every((p) => p.value !== undefined && p.value !== ''));
+    ok('with nothing waiting', v.panels[1].value === mmInrOf(0), v.panels[1].value);
+
+    addSip(c, inv, { start: '2026-06-15' });
+    v = c.investVals();
+    ok('the SIP appears as a row', v.tableRows.length === 1, String(v.tableRows.length));
+    ok('with a cell for every column',
+      v.tableRows[0].cells.length === v.tableCols.length,
+      v.tableRows[0].cells.length + ' vs ' + v.tableCols.length);
+    ok('a due SIP is highlighted', /fff8e6/.test(v.tableRows[0].style), v.tableRows[0].style);
+    ok('the heading says how many are waiting', /waiting/.test(v.tableSub), v.tableSub);
+    ok('committed each month is the instalment', v.panels[0].value === mmInrOf(5000),
+      v.panels[0].value);
+    ok('no panel shows NaN or undefined',
+      v.panels.every((p) => !/NaN|undefined|Infinity/.test(String(p.value) + String(p.note))),
+      JSON.stringify(v.panels.map((p) => p.value)));
+    ok('and no row cell does either',
+      v.tableRows[0].cells.every((cell) => !/NaN|undefined|Infinity/.test(String(cell.text || ''))),
+      JSON.stringify(v.tableRows[0].cells.map((x) => x.text)));
+
+    /* The switch back. */
+    v.tableTools[0].go();
+    ok('the toolbar switches back to holdings', c.state.invView === 'holdings', c.state.invView);
+    ok('and the holdings table returns', c.investVals().tableTitle === 'Investments');
+
+    /* A SIP pointing at a deleted investment must not crash the screen. */
+    c.setState({ invView: 'sips' });
+    c.mutate((db) => { db.investments = []; });
+    v = c.investVals();
+    ok('an orphaned SIP still renders', v.tableRows.length === 1);
+    ok('and says so rather than showing "undefined"',
+      /deleted investment/.test(v.tableRows[0].cells[0].text), v.tableRows[0].cells[0].text);
+  }
+
+  console.log('\nThe SIP dialog renders');
+  {
+    const { c, inv } = sipBook();
+    c.openSip('add');
+    ok('it opens', c.state.dlg && c.state.dlg.kind === 'sip');
+    ok('with the existing holding chosen', c.state.dlg.data.investmentId === inv.id);
+    ok('and renders', !!c.dlgVals().hasDlg);
+
+    c.dlgSet({ stepUpPct: 10 });
+    const withStep = c.dlgVals();
+    ok('the step-up interval appears once a step-up is asked for',
+      JSON.stringify(withStep.dlgFields).indexOf('Step up every') >= 0);
+
+    c.openSip('edit', c.state.db.sips[0] || Object.assign({}, c.state.dlg.data, { id: 'x', posted: 3, skipped: ['2026-01-01'] }));
+    ok('editing renders too', !!c.dlgVals().hasDlg);
+
+    /* With nothing to invest into, it says so instead of offering a broken form. */
+    const empty = book();
+    empty.openSip('add');
+    const ev = empty.dlgVals();
+    ok('with no holdings it explains rather than offering an empty list',
+      JSON.stringify(ev.dlgFields).indexOf('has to buy into something') >= 0);
+  }
+
+  console.log('\nThe Investments panels count SIPs honestly');
+  {
+    const { c, inv } = sipBook();
+    addSip(c, inv, { start: '2026-09-15', amount: 5000, freq: 'monthly' });
+    addSip(c, inv, { start: '2026-09-15', amount: 3000, freq: 'quarterly' });
+    const sum = c.invMonthAndMaturity();
+    ok('a quarterly SIP is not counted as a monthly one',
+      sum.monthlySip === Math.round(5000 + 3000 / 3), String(sum.monthlySip));
+    ok('both are counted as active', sum.activeSips === 2, String(sum.activeSips));
+    ok('and both are due today', sum.dueSips === 2, String(sum.dueSips));
+    ok('for the right total', sum.dueAmount === 8000, String(sum.dueAmount));
+  }
+
   console.log('\n' + (fails ? fails + ' FAILURE(S)' : 'all checks passed'));
   process.exit(fails ? 1 : 0);
 })().catch((e) => { console.error(e); process.exit(1); });

@@ -1733,6 +1733,12 @@ var MM_ROWH_DEFAULT = 32;
 var MM_SCHEMA = 5;                       /* bump whenever migrate() gains a step */
 var MM_FREQ = ['daily', 'weekly', 'biweekly', 'monthly', 'quarterly', 'halfyearly', 'yearly'];
 var MM_FREQ_LABEL = { daily: 'Daily', weekly: 'Weekly', biweekly: 'Fortnightly', monthly: 'Monthly', quarterly: 'Quarterly', halfyearly: 'Half-yearly', yearly: 'Yearly' };
+/* How many instalments a frequency produces in an average month. Used only to
+   put different frequencies on one comparable scale — never to post anything. */
+var MM_PER_MONTH = { daily: 30, weekly: 4.333, biweekly: 2.167, monthly: 1, quarterly: 1 / 3, halfyearly: 1 / 6, yearly: 1 / 12 };
+/* The frequencies a SIP is actually offered at. Daily SIPs exist but are rare
+   enough that offering one invites a mis-click. */
+var MM_SIP_FREQ = ['weekly', 'biweekly', 'monthly', 'quarterly', 'halfyearly', 'yearly'];
 var MM_MATCH = ['contains', 'starts', 'ends', 'exact', 'regex'];
 var MM_MATCH_LABEL = { contains: 'Contains', starts: 'Starts with', ends: 'Ends with', exact: 'Exact match', regex: 'Regular expression' };
 /* Collections every db must have.  migrate() backfills any that are missing so
@@ -4337,7 +4343,8 @@ class Component extends DCLogic {
       loan: this.saveLoan, cardpay: this.saveCardPay, bill: this.saveBill, goal: this.saveGoal,
       rule: this.saveRule, loanpay: this.saveLoanPay, recon: this.saveRecon, view: this.saveView,
       goaltop: this.saveGoalTopUp, delacct: this.confirmDeleteAccount, catmerge: this.confirmCatMerge,
-      password: this.changePassword, delaccount: this.deleteAccountNow
+      password: this.changePassword, delaccount: this.deleteAccountNow,
+      investment: this.saveInvestment, invtxn: this.saveInvTxn, sip: this.saveSip
     };
     if (by[d.kind]) { by[d.kind].call(this); return true; }
     return false;
@@ -6168,15 +6175,19 @@ class Component extends DCLogic {
         var a = Math.abs(+t.amount || 0);
         if (isFinite(a)) thisMonth += a;
       });
-      var monthlySip = 0, activeSips = 0;
+      var monthlySip = 0, activeSips = 0, dueSips = 0, dueAmount = 0;
       (self.state.db.sips || []).forEach(function (s) {
         if (s.status !== 'active') return;
         var a = Math.abs(+s.amount || 0);
         if (!isFinite(a)) return;
         activeSips++;
         /* Normalised to a month so one figure covers every frequency. */
-        var per = { monthly: 1, quarterly: 1 / 3, weekly: 4.33, yearly: 1 / 12 }[s.freq || 'monthly'] || 1;
-        monthlySip += a * per;
+        monthlySip += self.sipMonthly(s);
+        var pending = self.sipPending(s, today);
+        if (pending.length) {
+          dueSips++;
+          pending.forEach(function (dt) { dueAmount += self.sipAmountOn(s, dt); });
+        }
       });
       var next = null;
       (self.state.db.investments || []).forEach(function (inv) {
@@ -6187,13 +6198,27 @@ class Component extends DCLogic {
       });
       return {
         thisMonth: thisMonth, monthlySip: Math.round(monthlySip), activeSips: activeSips,
-        nextMaturity: next
+        dueSips: dueSips, dueAmount: Math.round(dueAmount), nextMaturity: next
       };
     });
   }
 
+  /* The Investments tab shows one of two things. The switch lives in the
+     toolbar rather than in a second row of tabs, because there are only two
+     and a whole tab strip for two things is noise. */
+  invViewTools(view) {
+    var self = this;
+    return [
+      this.btn('Holdings', function () { self.setState({ invView: 'holdings' }); },
+        view === 'holdings' ? 'active' : null),
+      this.btn('SIPs', function () { self.setState({ invView: 'sips' }); },
+        view === 'sips' ? 'active' : null)
+    ];
+  }
+
   investVals() {
     var self = this;
+    if (this.state.invView === 'sips') return this.sipVals();
     var p = this.portfolio();
     var extra = this.invMonthAndMaturity();
     var t = p.totals;
@@ -6262,9 +6287,9 @@ class Component extends DCLogic {
         ? p.rows.length + ' holding' + (p.rows.length === 1 ? '' : 's') +
           ' · buying moves money between your own accounts, so it is never counted as spending'
         : 'no investments yet',
-      tableTools: [
+      tableTools: this.invViewTools('holdings').concat([
         this.btn('+ Add investment', function () { self.openInvestment('add', {}); }, 'primary')
-      ],
+      ]),
       tableCols: [
         this.tcol('Investment', '200px'), this.tcol('Type', '150px'),
         this.tcol('Invested', '120px', 'right'), this.tcol('Current value', '120px', 'right'),
@@ -6463,6 +6488,243 @@ class Component extends DCLogic {
     this.setState({ dlg: null });
   }
 
+  /* =========================================================================
+     SIPs — a standing instruction to buy on a schedule.
+
+     Nothing here posts by itself. An instalment becomes real only when you
+     mark it paid, and marking it paid goes through the ordinary investment
+     transaction, so the accounting is the same transfer it always is.
+     ========================================================================= */
+
+  /* What one instalment costs on a given date, including any step-up. A
+     step-up is a rule you set, not a guess: the amount rises by a fixed
+     percentage every so many months from the day the SIP started. */
+  sipAmountOn(s, date) {
+    var base = Math.abs(+s.amount || 0);
+    var pct = parseFloat(s.stepUpPct) || 0;
+    var every = Math.round(+s.stepUpEvery || 12);
+    if (!(pct > 0) || !(every > 0) || !s.start || !date || date < s.start) return base;
+    var a = mmParse(s.start), b = mmParse(date);
+    var months = (b.getFullYear() - a.getFullYear()) * 12 + (b.getMonth() - a.getMonth());
+    if (b.getDate() < a.getDate()) months -= 1;
+    var steps = Math.floor(months / every);
+    if (!(steps > 0)) return base;
+    return Math.round(base * Math.pow(1 + pct / 100, steps) * 100) / 100;
+  }
+
+  sipEnded(s) {
+    if (s.status === 'ended') return true;
+    if (s.end && s.next > s.end) return true;
+    if (+s.count > 0 && (+s.posted || 0) >= +s.count) return true;
+    return false;
+  }
+
+  /* Every instalment from `next` up to today that has been neither paid nor
+     skipped. Mirrors recurPending, and for the same reason: a SIP you did not
+     open the app for in three months owes you three instalments, not one. */
+  sipPending(s, today) {
+    var out = [], guard = 0, cur = s.next;
+    today = today || mmIso(new Date());
+    if (!s || s.status !== 'active') return out;
+    var done = (s.postedDates || []).concat(s.skipped || []);
+    while (cur && cur <= today && guard++ < 400) {
+      if (s.end && cur > s.end) break;
+      if (+s.count > 0 && (+s.posted || 0) + out.length >= +s.count) break;
+      if (done.indexOf(cur) < 0) out.push(cur);
+      cur = this.nextDate(cur, s.freq);
+    }
+    return out;
+  }
+
+  /* One instalment put on a monthly scale, so a fortnightly SIP and a
+     quarterly one can be added together honestly. */
+  sipMonthly(s) {
+    var a = Math.abs(+s.amount || 0);
+    if (!isFinite(a)) return 0;
+    return a * (MM_PER_MONTH[s.freq] || 1);
+  }
+
+  openSip(mode, s) {
+    var today = mmIso(new Date());
+    var cash = this.state.db.accounts.filter(function (a) {
+      return !a.archived && (a.type === 'bank' || a.type === 'cash' || a.type === 'wallet');
+    })[0];
+    var first = (this.state.db.investments || []).filter(function (x) {
+      return x.status !== 'closed' && x.status !== 'sold';
+    })[0];
+    var base = mode === 'edit' ? mmClone(s) : {
+      id: '', investmentId: first ? first.id : '', amount: 0, freq: 'monthly',
+      start: today, next: today, end: '', count: 0, posted: 0, postedDates: [], skipped: [],
+      accountId: cash ? cash.id : '', status: 'active',
+      stepUpPct: 0, stepUpEvery: 12, notes: ''
+    };
+    this.setState({ dlg: { kind: 'sip', mode: mode || 'add', data: base } });
+  }
+
+  saveSip() {
+    var d = this.state.dlg, s = Object.assign({}, d.data);
+    var isAdd = d.mode !== 'edit';
+    var inv = this.inv(s.investmentId);
+    if (!inv) { this.flash('Choose the investment this SIP buys into.'); return; }
+    var amount = Math.abs(parseFloat(s.amount) || 0);
+    if (!(amount > 0)) { this.flash('Enter the instalment amount.'); return; }
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(s.start)) { this.flash('Choose the date the SIP starts.'); return; }
+    if (s.end && !/^\d{4}-\d{2}-\d{2}$/.test(s.end)) { this.flash('That end date is not a date.'); return; }
+    if (s.end && s.end < s.start) { this.flash('A SIP cannot end before it starts.'); return; }
+    if (!s.accountId || !this.acct(s.accountId)) {
+      this.flash('Choose the account the instalments come from.'); return;
+    }
+    if (MM_SIP_FREQ.indexOf(s.freq) < 0) s.freq = 'monthly';
+    s.amount = amount;
+    s.count = Math.max(0, Math.round(+s.count || 0));
+    s.stepUpPct = Math.max(0, parseFloat(s.stepUpPct) || 0);
+    s.stepUpEvery = Math.max(1, Math.round(+s.stepUpEvery || 12));
+    s.notes = String(s.notes || '');
+    /* A new SIP starts owing its first instalment on its start date. Editing
+       an existing one never rewinds what has already been paid. */
+    if (isAdd || !/^\d{4}-\d{2}-\d{2}$/.test(s.next)) s.next = s.start;
+
+    this.pushUndo(isAdd ? 'adding a SIP' : 'editing a SIP', ['sips']);
+    this.mutate(function (db) {
+      s.updatedAt = Date.now();
+      if (!isAdd) {
+        db.sips.forEach(function (x, i) { if (x.id === s.id) db.sips[i] = Object.assign({}, x, s); });
+        return;
+      }
+      s.id = mmUid();
+      s.posted = 0; s.postedDates = []; s.skipped = [];
+      s.createdAt = Date.now();
+      s.demo = false;
+      db.sips.push(s);
+    }, isAdd
+      ? mmInr(amount) + ' ' + (MM_FREQ_LABEL[s.freq] || s.freq).toLowerCase() +
+        ' into ' + inv.name + '. Nothing is bought until you mark an instalment paid.'
+      : 'SIP updated.');
+    this.setState({ dlg: null });
+  }
+
+  /* Marking an instalment paid opens the ordinary investment transaction,
+     pre-filled. The units are not typed: they follow from the NAV that
+     actually applied on the day. */
+  markSipPaid(s, date) {
+    var inv = this.inv(s.investmentId);
+    if (!inv) { this.flash('That SIP points at an investment that is no longer there.'); return; }
+    var pending = this.sipPending(s);
+    var when = date || pending[0] || s.next;
+    if (!when) { this.flash('There is no instalment to record.'); return; }
+    var unitised = mmInvIsUnitised(inv.type);
+    this.setState({
+      dlg: {
+        kind: 'invtxn', mode: 'add',
+        data: {
+          investmentId: inv.id, name: inv.name, unitised: unitised,
+          type: 'sip', date: when, amount: this.sipAmountOn(s, when), units: 0,
+          nav: +inv.currentNav || 0,
+          accountId: s.accountId && this.acct(s.accountId) ? s.accountId : '',
+          notes: 'SIP instalment', sipId: s.id, sipDate: when,
+          navBusy: !!(unitised && inv.schemeCode),
+          navNote: unitised && inv.schemeCode
+            ? 'Looking up the NAV published for ' + mmNiceDate(when) + '…'
+            : (unitised && inv.navDate
+              ? 'The latest NAV held here is from ' + mmNiceDate(inv.navDate) +
+                '. Check it against the day you were actually charged.'
+              : '')
+        }
+      }
+    });
+    if (unitised && inv.schemeCode) this.sipNavFor(inv, when);
+    return true;
+  }
+
+  /* The NAV that applied on the instalment date. NAV is published once a
+     working day, so an instalment on a Sunday takes the last one published
+     before it — and which day it came from is always said out loud. */
+  sipNavFor(inv, when) {
+    var self = this;
+    return this.api('/api/v1/funds/' + encodeURIComponent(inv.schemeCode) + '/history')
+      .then(function (r) {
+        var d = self.state.dlg;
+        if (!d || d.kind !== 'invtxn' || d.data.investmentId !== inv.id) return;
+        var series = (r && r.history) || [];
+        var hit = null;
+        for (var i = 0; i < series.length; i++) {
+          if (series[i].date <= when) hit = series[i]; else break;
+        }
+        if (!hit || !(+hit.nav > 0)) {
+          /* No published NAV, so none is invented. */
+          self.dlgSet({
+            navBusy: false,
+            navNote: 'No NAV was published on or before ' + mmNiceDate(when) +
+              '. Enter the price you were actually charged.'
+          });
+          return;
+        }
+        self.dlgSet({
+          navBusy: false, nav: hit.nav, units: 0,
+          navNote: hit.date === when
+            ? 'NAV published for ' + mmNiceDate(when) + '.'
+            : 'NAV of ' + mmNiceDate(hit.date) + ' — the last one published on or before ' +
+              mmNiceDate(when) + '.'
+        });
+      })
+      .catch(function () {
+        var d = self.state.dlg;
+        if (!d || d.kind !== 'invtxn') return;
+        self.dlgSet({
+          navBusy: false,
+          navNote: 'The NAV for that date could not be fetched, so nothing has been filled in. ' +
+            'Enter the price you were charged.'
+        });
+      });
+  }
+
+  /* Skipping an instalment moves the schedule on without moving any money. */
+  skipSip(s) {
+    var self = this;
+    var dt = this.sipPending(s)[0] || s.next;
+    if (!dt) { this.flash('There is nothing to skip.'); return; }
+    this.pushUndo('skipping an instalment', ['sips']);
+    this.mutate(function (db) {
+      db.sips.forEach(function (x) {
+        if (x.id !== s.id) return;
+        x.skipped = (x.skipped || []).concat([dt]);
+        if (x.next <= dt) x.next = self.nextDate(dt, x.freq);
+        if (x.end && x.next > x.end) x.status = 'ended';
+        x.updatedAt = Date.now();
+      });
+    });
+    this.flashUndo('Instalment of ' + mmNiceDate(dt) + ' skipped — no money moved.',
+      'skipping an instalment');
+  }
+
+  toggleSip(s) {
+    var on = s.status === 'active';
+    this.mutate(function (db) {
+      db.sips.forEach(function (x) {
+        if (x.id === s.id) { x.status = on ? 'paused' : 'active'; x.updatedAt = Date.now(); }
+      });
+    }, on ? 'SIP paused.' : 'SIP resumed.');
+  }
+
+  deleteSip(s) {
+    var self = this;
+    var inv = this.inv(s.investmentId);
+    this.setState({
+      confirm: {
+        msg: 'Delete this SIP into ' + (inv ? inv.name : 'a deleted investment') +
+          '? The instalments already recorded are kept — only the standing instruction goes.',
+        ok: function () {
+          self.pushUndo('delete of a SIP', ['sips']);
+          self.mutate(function (db) {
+            db.sips = db.sips.filter(function (x) { return x.id !== s.id; });
+          });
+          self.setState({ confirm: null });
+          self.flashUndo('SIP removed. What it already bought is untouched.', 'delete of a SIP');
+        }
+      }
+    });
+  }
+
   /* Putting more in, or taking some out, after the fact. */
   openInvTxn(inv, kind) {
     if (!inv) return;
@@ -6511,13 +6773,28 @@ class Component extends DCLogic {
     var inflow = mmInvIsInflow(t.type);
     var holding = inv.accountId;
     this.pushUndo('recording ' + (MM_INV_TXN_LABEL[t.type] || t.type) + ' on ' + inv.name,
-      ['invTxns', 'txns']);
+      ['invTxns', 'txns', 'sips']);
     this.mutate(function (db) {
       db.invTxns.push({
         id: mmUid(), investmentId: inv.id, date: t.date, type: t.type,
         amount: amount, units: units, nav: nav, accountId: t.accountId,
+        sipId: t.sipId || '',
         notes: String(t.notes || ''), createdAt: Date.now(), updatedAt: Date.now()
       });
+      /* If this instalment came from a SIP, the schedule moves on — but only
+         now that the money has actually been recorded, never before. */
+      if (t.sipId) {
+        var when = t.sipDate || t.date;
+        db.sips.forEach(function (x) {
+          if (x.id !== t.sipId) return;
+          x.postedDates = (x.postedDates || []).concat([when]);
+          x.posted = (+x.posted || 0) + 1;
+          if (x.next <= when) x.next = self.nextDate(when, x.freq);
+          if (x.end && x.next > x.end) x.status = 'ended';
+          if (+x.count > 0 && x.posted >= +x.count) x.status = 'ended';
+          x.updatedAt = Date.now();
+        });
+      }
       if (holding && db.accounts.some(function (x) { return x.id === holding; })) {
         /* Both directions are transfers between accounts you own. A dividend
            paid out in cash is money leaving the holding and arriving in the
@@ -6537,6 +6814,136 @@ class Component extends DCLogic {
       }
     }, (MM_INV_TXN_LABEL[t.type] || 'Transaction') + ' of ' + mmInr(amount) + ' recorded.');
     this.setState({ dlg: null });
+  }
+
+  /* The SIP book: what is committed, what is owed, and what has been bought.
+     A due instalment is highlighted and waits — it is never posted for you. */
+  sipVals() {
+    var self = this, db = this.state.db, today = mmIso(new Date());
+    var sips = db.sips || [];
+    var committed = 0, dueCount = 0, dueTotal = 0, boughtThisYear = 0;
+    var yearStart = today.slice(0, 4) + '-01-01';
+
+    (db.invTxns || []).forEach(function (t) {
+      if (t.type !== 'sip') return;
+      if (String(t.date) < yearStart || String(t.date) > today) return;
+      var a = Math.abs(+t.amount || 0);
+      if (isFinite(a)) boughtThisYear += a;
+    });
+
+    var rows = sips.map(function (s, i) {
+      var inv = self.inv(s.investmentId);
+      var pending = self.sipPending(s, today);
+      var due = pending.length > 0;
+      var ended = self.sipEnded(s);
+      if (s.status === 'active' && !ended) committed += self.sipMonthly(s);
+      if (due) {
+        dueCount++;
+        pending.forEach(function (dt) { dueTotal += self.sipAmountOn(s, dt); });
+      }
+      var status = ended ? 'Ended'
+        : s.status !== 'active' ? 'Paused'
+          : due ? (pending.length > 1 ? pending.length + ' due' : 'Due now') : 'Active';
+
+      /* What this SIP has actually bought, which is not the same as what it
+         was set up to buy — only recorded instalments count. */
+      var bought = 0, boughtUnits = 0;
+      (db.invTxns || []).forEach(function (t) {
+        if (t.sipId !== s.id) return;
+        bought += Math.abs(+t.amount || 0);
+        boughtUnits += Math.abs(+t.units || 0);
+      });
+
+      var acts = [];
+      if (!ended && s.status === 'active') {
+        acts.push({
+          label: due ? 'Mark paid…' : 'Record next…',
+          go: function (e) { e.stopPropagation(); self.markSipPaid(s, due ? pending[0] : s.next); }
+        });
+        acts.push({ label: 'Skip', go: function (e) { e.stopPropagation(); self.skipSip(s); } });
+      }
+      acts.push({
+        label: s.status === 'active' ? 'Pause' : 'Resume',
+        go: function (e) { e.stopPropagation(); self.toggleSip(s); }
+      });
+      acts.push({ label: 'Edit', go: function (e) { e.stopPropagation(); self.openSip('edit', s); } });
+      acts.push({ label: 'Delete', danger: true, go: function (e) { e.stopPropagation(); self.deleteSip(s); } });
+
+      var nextAmount = self.sipAmountOn(s, due ? pending[0] : s.next);
+      return {
+        key: s.id,
+        style: self.rowStyle(i, false) + (due ? ';background:var(--c-fff8e6)' : (ended ? ';opacity:.6' : '')),
+        go: function () { self.openSip('edit', s); },
+        cells: [
+          self.tcell(inv ? inv.name : '(deleted investment)', '200px', 'left',
+            { bold: true, color: inv ? '' : 'var(--c-a3241f)' }),
+          self.tcell(mmInr(nextAmount) +
+            (nextAmount !== Math.abs(+s.amount || 0) ? ' ↑' : ''), '110px', 'right'),
+          self.tcell(MM_FREQ_LABEL[s.freq] || s.freq, '100px'),
+          self.tcell(self.acctName(s.accountId), '140px'),
+          self.tcell(ended && !due ? '—' : mmDmy(due ? pending[0] : s.next), '96px'),
+          self.tcell(mmInr(bought), '116px', 'right'),
+          self.tcell(boughtUnits > 0 ? boughtUnits.toFixed(4) : '—', '100px', 'right'),
+          self.tcell(String(+s.posted || 0) + (+s.count > 0 ? ' of ' + s.count : ''), '80px', 'right'),
+          self.tcell(status, '84px', 'left',
+            { bold: due, color: due ? 'var(--c-b3701c)' : ended ? 'var(--c-7b8b9b)' : 'var(--c-3c5163)' }),
+          self.tacts(acts, '300px')
+        ]
+      };
+    });
+
+    var stepping = sips.filter(function (s) { return (+s.stepUpPct || 0) > 0 && s.status === 'active'; }).length;
+    return {
+      isTable: true,
+      tableTitle: 'SIPs',
+      tableSub: dueCount
+        ? dueCount + ' SIP' + (dueCount === 1 ? '' : 's') +
+          ' waiting — nothing is ever bought without you marking it paid'
+        : (sips.length ? 'nothing due right now' : 'no SIPs set up yet'),
+      tableTools: this.invViewTools('sips').concat([
+        this.btn('+ Add SIP', function () { self.openSip('add'); }, 'primary')
+      ]),
+      tableCols: [
+        this.tcol('Investment', '200px'), this.tcol('Instalment', '110px', 'right'),
+        this.tcol('Frequency', '100px'), this.tcol('From account', '140px'),
+        this.tcol('Next due', '96px'), this.tcol('Bought so far', '116px', 'right'),
+        this.tcol('Units', '100px', 'right'), this.tcol('Paid', '80px', 'right'),
+        this.tcol('Status', '84px'), this.tcol('Actions', '300px', 'right')
+      ],
+      tableRows: rows, tableEmpty: rows.length === 0,
+      emptyMsg: (db.investments || []).length
+        ? 'No SIPs yet. Set one up against a holding and each instalment can be recorded as it is charged.'
+        : 'Add an investment first — a SIP has to buy into something.',
+      emptyBtn: (db.investments || []).length ? '+ Add SIP' : '+ Add investment',
+      emptyGo: function () {
+        if ((self.state.db.investments || []).length) self.openSip('add');
+        else self.openInvestment('add', {});
+      },
+      hasPanels: true, hasBars: false, hasFoot: false,
+      panels: [
+        this.panel({
+          label: 'Committed each month', value: mmInr(Math.round(committed)),
+          note: 'every frequency put on a monthly scale'
+        }),
+        this.panel({
+          label: 'Waiting to be recorded', value: mmInr(Math.round(dueTotal)),
+          note: dueCount + ' SIP' + (dueCount === 1 ? '' : 's'),
+          color: dueCount ? 'var(--c-b3701c)' : 'var(--c-14416e)'
+        }),
+        this.panel({
+          label: 'Active SIPs', value: String(sips.filter(function (s) { return s.status === 'active' && !self.sipEnded(s); }).length),
+          note: 'of ' + sips.length + ' set up' + (stepping ? ' · ' + stepping + ' stepping up' : '')
+        }),
+        this.panel({
+          label: 'Bought this year', value: mmInr(boughtThisYear),
+          note: 'instalments actually recorded since ' + mmDmy(yearStart)
+        })
+      ],
+      hasTableNote: true,
+      tableNote: 'Marking an instalment paid fills in the NAV published for that day and works out the ' +
+        'units from it. Money moves from your account into the holding as a transfer, so a SIP is never ' +
+        'counted as spending.'
+    };
   }
 
   loanVals() {
@@ -9818,6 +10225,57 @@ class Component extends DCLogic {
       buttons = [cancel, this.btn(d.mode === 'edit' ? 'Save' : 'Add investment',
         function () { self.saveInvestment(); }, 'primary')];
 
+    } else if (d.kind === 'sip') {
+      a = d.data;
+      title = (d.mode === 'edit' ? 'Edit SIP' : 'Add SIP');
+      width = 520;
+      var invOptions = (s.db.investments || []).filter(function (x) {
+        return x.status !== 'closed' && x.status !== 'sold';
+      }).map(function (x) { return { v: x.id, l: x.name }; });
+      if (!invOptions.length) {
+        fields.push(this.fld('', 'static',
+          'There is nothing to invest into yet. Add an investment first — a SIP has to buy into something.',
+          null, { wrap: true }));
+        buttons = [cancel, this.btn('Add investment', function () { self.openInvestment('add', {}); }, 'primary')];
+      } else {
+        fields.push(this.fld('Into', 'select', a.investmentId, set('investmentId'),
+          { options: invOptions }));
+        fields.push(this.fld('Instalment', 'text', a.amount, set('amount'),
+          { type: 'number', focus: d.mode !== 'edit', hint: 'what is debited each time' }));
+        fields.push(this.fld('Frequency', 'select', a.freq, set('freq'), {
+          options: MM_SIP_FREQ.map(function (k) { return { v: k, l: MM_FREQ_LABEL[k] }; })
+        }));
+        fields.push(this.fld('Paid from', 'select', a.accountId, set('accountId'),
+          { options: this.acctOptions() }));
+        fields.push(this.fld('First instalment', 'text', a.start, set('start'),
+          { type: 'date', hint: 'every instalment from this date onwards will be offered to record' }));
+        fields.push(this.fld('Ends on', 'text', a.end, set('end'),
+          { type: 'date', hint: 'optional — leave empty for a perpetual SIP' }));
+        fields.push(this.fld('Number of instalments', 'text', a.count, set('count'),
+          { type: 'number', hint: 'optional — 0 means no limit' }));
+        fields.push(this.fld('Step up by %', 'text', a.stepUpPct, set('stepUpPct'),
+          { type: 'number', hint: 'optional — 0 for a flat SIP' }));
+        if ((+a.stepUpPct || 0) > 0) {
+          fields.push(this.fld('Step up every (months)', 'text', a.stepUpEvery, set('stepUpEvery'),
+            { type: 'number', hint: '12 is the usual annual step-up' }));
+        }
+        if (d.mode === 'edit') {
+          fields.push(this.fld('Recorded so far', 'static',
+            (+a.posted || 0) + ' instalment' + ((+a.posted || 0) === 1 ? '' : 's') +
+            ((a.skipped || []).length ? ', ' + a.skipped.length + ' skipped' : ''),
+            null, { hint: 'editing a SIP never changes what has already been recorded' }));
+          fields.push(this.fld('Status', 'select', a.status, set('status'), {
+            options: [{ v: 'active', l: 'Active' }, { v: 'paused', l: 'Paused' },
+              { v: 'ended', l: 'Ended' }]
+          }));
+        }
+        fields.push(this.fld('Notes', 'text', a.notes, set('notes'), { hint: 'Optional' }));
+        note = 'A SIP here is a reminder with the arithmetic attached, not a mandate. ' +
+          'Nothing is bought and no money moves until you mark an instalment paid.';
+        buttons = [cancel, this.btn(d.mode === 'edit' ? 'Save' : 'Add SIP',
+          function () { self.saveSip(); }, 'primary')];
+      }
+
     } else if (d.kind === 'invtxn') {
       a = d.data;
       title = 'Record a transaction';
@@ -9829,7 +10287,10 @@ class Component extends DCLogic {
       fields.push(this.fld('Date', 'text', a.date, set('date'), { type: 'date' }));
       fields.push(this.fld('Amount', 'text', a.amount, set('amount'), { type: 'number', focus: true }));
       if (a.unitised) {
-        fields.push(this.fld('Price / NAV', 'text', a.nav, set('nav'), { type: 'number', hint: 'per unit' }));
+        fields.push(this.fld('Price / NAV', 'text', a.nav, set('nav'), {
+          type: 'number',
+          hint: a.navBusy ? 'looking up the published NAV…' : (a.navNote || 'per unit')
+        }));
         fields.push(this.fld('Units', 'text', a.units, set('units'),
           { type: 'number', hint: 'left blank, this is worked out as amount ÷ price' }));
       }
@@ -9839,6 +10300,10 @@ class Component extends DCLogic {
       note = mmInvIsInflow(a.type)
         ? 'Money moves out of the account you choose and into the holding. It is a transfer, so it is not counted as spending.'
         : 'Money moves out of the holding and into the account you choose. It is a transfer, so it is not counted as income.';
+      if (a.sipId) {
+        note = 'Instalment due ' + mmNiceDate(a.sipDate) + '. ' + note +
+          ' Recording it moves the SIP on to its next date.';
+      }
       buttons = [cancel, this.btn('Record', function () { self.saveInvTxn(); }, 'primary')];
 
     } else if (d.kind === 'localdata') {
