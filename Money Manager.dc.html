@@ -1423,9 +1423,14 @@
               </sc-for>
             </div>
             <sc-for list="{{ dlgTableRows }}" as="r" hint-placeholder-count="5">
-              <div style="{{ r.style }}">
+              <div onClick="{{ r.go }}" style="{{ r.style }}">
                 <sc-for list="{{ r.cells }}" as="c" hint-placeholder-count="5">
-                  <div style="{{ c.style }}">{{ c.text }}</div>
+                  <div style="{{ c.style }}">
+                    <sc-if value="{{ c.isText }}">{{ c.text }}</sc-if>
+                    <sc-for list="{{ c.actions }}" as="a" hint-placeholder-count="0">
+                      <button onClick="{{ a.go }}" style="{{ a.style }}">{{ a.label }}</button>
+                    </sc-for>
+                  </div>
                 </sc-for>
               </div>
             </sc-for>
@@ -10944,7 +10949,8 @@ class Component extends DCLogic {
             this.tcol('NAV', '95px', 'right'), this.tcol('As of', '92px'), this.tcol('', '70px', 'right')];
           tRows = a.fundResults.map(function (f) {
             return {
-              key: f.schemeCode, style: self.rowStyle(0, false), go: function () { self.invPickFund(f); },
+              key: f.schemeCode, style: self.rowStyle(0, false) + ';cursor:pointer',
+            go: function () { self.invPickFund(f); },
               cells: [
                 self.tcell(f.name, '250px'),
                 self.tcell([f.plan, f.option].filter(Boolean).join(' · '), '175px'),
@@ -11036,7 +11042,7 @@ class Component extends DCLogic {
           this.tcol('NAV', '95px', 'right'), this.tcol('As of', '92px'), this.tcol('', '70px', 'right')];
         tRows = a.fundResults.map(function (f) {
           return {
-            key: f.schemeCode, style: self.rowStyle(0, false),
+            key: f.schemeCode, style: self.rowStyle(0, false) + ';cursor:pointer',
             go: function () { self.watchPickFund(f); },
             cells: [
               self.tcell(f.name, '250px'),
