@@ -1103,6 +1103,10 @@ function fundRow(r) {
     schemeCode: r.scheme_code,
     isin: r.isin || '',
     isinReinvest: r.isin_reinv || '',
+    /* An IDCW payout plan carries its ISIN in the reinvestment column, so a
+       scheme that plainly has one would otherwise be shown as having none.
+       Both raw columns are kept; this is the one to display. */
+    isinEffective: r.isin || r.isin_reinv || '',
     name: r.name,
     amc: r.amc || '',
     plan: r.plan_name || '',

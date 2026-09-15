@@ -1422,6 +1422,154 @@ function mmNiceDate(iso) {
 function mmDaysBetween(from, to) {
   return Math.round((mmParse(to).getTime() - mmParse(from).getTime()) / 86400000);
 }
+/* ---------------------------------------------------------------------------
+   INVESTMENT RETURNS
+
+   One implementation of each figure, used by every screen, so the dashboard,
+   the portfolio table and an investment's own page can never disagree.
+
+   Every function here returns a NUMBER or null. Never NaN, never Infinity,
+   never undefined — a finance screen showing "NaN%" is worse than one showing
+   nothing, because it looks like a number.
+   --------------------------------------------------------------------------- */
+
+/* Money in and money out, expressed the way a return calculation needs it:
+   what you paid is negative, what you got back (or still hold) is positive. */
+function mmGainLoss(invested, currentValue) {
+  var a = +invested, b = +currentValue;
+  if (!isFinite(a) || !isFinite(b)) return 0;
+  return b - a;
+}
+
+/* Simple return, as a percentage. Zero invested has no return — not an
+   infinite one — so it is 0, and the caller can choose to show a dash. */
+function mmReturnPct(invested, currentValue) {
+  var a = +invested, b = +currentValue;
+  if (!isFinite(a) || !isFinite(b) || a <= 0) return 0;
+  var pct = ((b - a) / a) * 100;
+  return isFinite(pct) ? pct : 0;
+}
+
+/* Net present value of dated cash flows at annual rate r, with time measured
+   in actual days over 365 — which is what makes this XIRR rather than IRR. */
+function mmNpvAt(flows, rate) {
+  var t0 = mmParse(flows[0].date).getTime();
+  var npv = 0;
+  for (var i = 0; i < flows.length; i++) {
+    var years = (mmParse(flows[i].date).getTime() - t0) / (365 * 86400000);
+    npv += flows[i].amount / Math.pow(1 + rate, years);
+  }
+  return npv;
+}
+
+/* XIRR: the annual rate that makes those dated flows net to zero.
+ *
+ * Returns null rather than a wrong number whenever it cannot be trusted —
+ * fewer than two flows, all the money going the same way, or no convergence.
+ * A caller that gets null shows the simple return and says XIRR is
+ * unavailable, which is honest; a caller that gets a number can rely on it.
+ *
+ * Newton-Raphson first because it converges in a handful of steps for
+ * realistic portfolios, then bisection, which is slower but cannot diverge.
+ * Newton alone will happily run off to infinity on awkward flows, and an
+ * investment app must not print whatever it lands on.
+ */
+function mmXirr(flowsIn) {
+  if (!Array.isArray(flowsIn) || flowsIn.length < 2) return null;
+
+  var flows = [];
+  for (var i = 0; i < flowsIn.length; i++) {
+    var f = flowsIn[i];
+    var amt = +(f && f.amount);
+    var date = f && f.date;
+    if (!isFinite(amt) || amt === 0) continue;
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(String(date))) return null;
+    flows.push({ date: String(date), amount: amt });
+  }
+  if (flows.length < 2) return null;
+
+  flows.sort(function (a, b) { return a.date < b.date ? -1 : a.date > b.date ? 1 : 0; });
+  /* Every flow on one day gives no time span to annualise over. */
+  if (flows[0].date === flows[flows.length - 1].date) return null;
+
+  var hasNeg = false, hasPos = false;
+  for (i = 0; i < flows.length; i++) {
+    if (flows[i].amount < 0) hasNeg = true; else hasPos = true;
+  }
+  /* Money must have gone both ways, or there is no rate that balances them. */
+  if (!hasNeg || !hasPos) return null;
+
+  /* --- Newton-Raphson --- */
+  var rate = 0.1;
+  for (i = 0; i < 60; i++) {
+    var t0 = mmParse(flows[0].date).getTime();
+    var npv = 0, slope = 0, bad = false;
+    for (var j = 0; j < flows.length; j++) {
+      var years = (mmParse(flows[j].date).getTime() - t0) / (365 * 86400000);
+      var base = 1 + rate;
+      if (base <= 0) { bad = true; break; }
+      var disc = Math.pow(base, years);
+      if (!isFinite(disc) || disc === 0) { bad = true; break; }
+      npv += flows[j].amount / disc;
+      slope -= (years * flows[j].amount) / (disc * base);
+    }
+    if (bad || !isFinite(npv) || !isFinite(slope) || slope === 0) break;
+    var next = rate - npv / slope;
+    if (!isFinite(next) || next <= -0.9999999) break;
+    if (Math.abs(next - rate) < 1e-9) {
+      rate = next;
+      return mmXirrResult(flows, rate);
+    }
+    rate = next;
+  }
+
+  /* --- bisection, over a range wide enough for anything realistic --- */
+  var lo = -0.999999, hi = 100;
+  var fLo = mmNpvAt(flows, lo), fHi = mmNpvAt(flows, hi);
+  if (!isFinite(fLo) || !isFinite(fHi) || fLo * fHi > 0) return null;
+  for (i = 0; i < 300; i++) {
+    var mid = (lo + hi) / 2;
+    var fMid = mmNpvAt(flows, mid);
+    if (!isFinite(fMid)) return null;
+    if (Math.abs(fMid) < 1e-7 || (hi - lo) < 1e-10) return mmXirrResult(flows, mid);
+    if (fLo * fMid < 0) { hi = mid; fHi = fMid; } else { lo = mid; fLo = fMid; }
+  }
+  return mmXirrResult(flows, (lo + hi) / 2);
+}
+
+/* A rate is only returned if it is finite and not absurd. -100% or +10,000%
+   means the flows were degenerate, and a plausible-looking number would be
+   more misleading than none. */
+function mmXirrResult(flows, rate) {
+  if (!isFinite(rate)) return null;
+  var pct = rate * 100;
+  if (pct <= -99.99 || pct > 100000) return null;
+  return pct;
+}
+
+/* The cash flows an investment's own transactions imply, ready for mmXirr:
+   money paid in is negative, money taken out is positive, and what is still
+   held counts as a final inflow on the valuation date. */
+function mmInvestmentFlows(txns, currentValue, asOf) {
+  var flows = [];
+  (txns || []).forEach(function (t) {
+    var amt = +t.amount;
+    if (!isFinite(amt) || amt === 0) return;
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(String(t.date))) return;
+    var kind = String(t.type || '').toLowerCase();
+    /* Buying is money leaving your pocket; selling, maturing and income are
+       money coming back. */
+    var out = kind === 'buy' || kind === 'sip' || kind === 'lumpsum' ||
+      kind === 'lump sum' || kind === 'additional' || kind === 'reinvestment';
+    flows.push({ date: String(t.date), amount: out ? -Math.abs(amt) : Math.abs(amt) });
+  });
+  var value = +currentValue;
+  if (isFinite(value) && value !== 0) {
+    flows.push({ date: asOf || mmIso(new Date()), amount: Math.abs(value) });
+  }
+  return flows;
+}
+
 /* 1st, 2nd, 3rd, 4th ... 11th, 12th, 13th, 21st. */
 function mmOrdinal(n) {
   n = parseInt(n, 10) || 0;
