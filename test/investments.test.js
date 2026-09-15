@@ -2120,6 +2120,153 @@ function withFundSearch(c, result) {
     ok('and does not claim a NAV for it', !/NAV of/.test(v.panels[1].note), v.panels[1].note);
   }
 
+  /* --------------------------------------- why a holding is not moving */
+
+  console.log('\nA holding with no scheme says so, instead of looking broken');
+  {
+    /* What someone does who types the name instead of using Search: the
+       holding is real, but nothing is attached to price it, so its value sits
+       at cost for ever. That used to be invisible. */
+    const c = withFundSearch(book());
+    c.openInvestment('add', {});
+    c.dlgSet({
+      name: 'Parag Parikh Flexi Cap', type: 'Lump Sum',
+      buyDate: '2026-01-15', buyAmount: 50000, buyNav: 89.5712
+    });
+    c.saveInvestment();
+    const inv = c.state.db.investments[0];
+    ok('no scheme was attached', !inv.schemeCode, JSON.stringify(inv.schemeCode));
+
+    const p = c.invPriceSource(inv);
+    ok('the holding is reported as not linked', p.text === 'not linked', p.text);
+    ok('in a colour that says it needs attention', /a3241f/.test(p.color), p.color);
+    ok('and the tooltip says how to fix it', /search for it/i.test(p.title), p.title);
+
+    c.state.tab = 'Investments';
+    const v = c.investVals(c.balances());
+    const priced = v.tableCols.findIndex((x) => x.label === 'Priced');
+    ok('the table has a Priced column', priced >= 0, JSON.stringify(v.tableCols.map((x) => x.label)));
+    ok('and the row says "not linked" in it', v.tableRows[0].cells[priced].text === 'not linked',
+      v.tableRows[0].cells[priced].text);
+    ok('the note explains what to do', /no scheme is attached/i.test(v.tableNote), v.tableNote);
+    ok('and counts how many are like that', /1 holding\(s\) show/.test(v.tableNote), v.tableNote);
+
+    /* A refresh says there is nothing to fetch rather than failing silently. */
+    await c.refreshInvestmentNavs();
+    ok('a refresh explains there is nothing linked',
+      /no holding is linked/i.test(c.state.toast || ''), c.state.toast);
+  }
+
+  console.log('\nAnd it can be linked afterwards, from Edit');
+  {
+    const c = withFundSearch(book());
+    c.openInvestment('add', {});
+    c.dlgSet({ name: 'Parag Parikh Flexi Cap', type: 'Lump Sum', buyDate: '2026-01-15', buyAmount: 50000, buyNav: 89.5712 });
+    c.saveInvestment();
+    const inv = c.state.db.investments[0];
+
+    c.openInvestment('edit', c.inv(inv.id));
+    ok('the search box starts empty rather than undefined',
+      c.state.dlg.data.fundQuery === '', JSON.stringify(c.state.dlg.data.fundQuery));
+    ok('and the results start empty too', c.state.dlg.data.fundResults === null,
+      JSON.stringify(c.state.dlg.data.fundResults));
+    ok('the search is offered when editing', /Find the fund/.test(JSON.stringify(c.dlgVals().dlgFields)));
+
+    c.dlgSet({ fundQuery: 'parag parikh' });
+    await c.invFundSearch();
+    c.invPickFund(PPFAS);
+    c.saveInvestment();
+
+    const after = c.inv(inv.id);
+    ok('the scheme is now attached', after.schemeCode === '122639', after.schemeCode);
+    ok('with its NAV and date', +after.currentNav === 89.5712 && after.navDate === '2026-09-11',
+      after.currentNav + ' @ ' + after.navDate);
+    ok('editing did not duplicate the holding', c.state.db.investments.length === 1);
+    ok('nor change what was invested', c.invState(after).invested === 50000,
+      String(c.invState(after).invested));
+    ok('and the row now shows the NAV date', c.invPriceSource(after).text === '11-09-2026',
+      c.invPriceSource(after).text);
+
+    /* And now it tracks. */
+    c.api = (url) => (/\/funds\/\d+$/.test(url)
+      ? Promise.resolve({ fund: { schemeCode: '122639', nav: 95, navDate: '2026-09-15' } })
+      : Promise.resolve({}));
+    await c.refreshInvestmentNavs();
+    ok('the price now moves', +c.inv(inv.id).currentNav === 95, String(c.inv(inv.id).currentNav));
+    ok('and the gain with it', c.invState(c.inv(inv.id)).gain > 3000,
+      String(c.invState(c.inv(inv.id)).gain));
+  }
+
+  console.log('\nEvery way a price can be sourced is named');
+  {
+    const c = book();
+    c.mutate((db) => {
+      db.investments = [
+        { id: 'a', name: 'Linked, fresh', type: 'Lump Sum', accountId: 'mf', schemeCode: '1', currentNav: 10, navDate: mmIsoOf(new Date()), status: 'active', createdAt: 1, updatedAt: 1 },
+        { id: 'b', name: 'Linked, stale', type: 'Lump Sum', accountId: 'mf', schemeCode: '2', currentNav: 10, navDate: '2026-06-01', status: 'active', createdAt: 1, updatedAt: 1 },
+        { id: 'c', name: 'Linked, never fetched', type: 'Lump Sum', accountId: 'mf', schemeCode: '3', currentNav: 0, navDate: '', status: 'active', createdAt: 1, updatedAt: 1 },
+        { id: 'd', name: 'Could be linked', type: 'ETF', accountId: 'mf', schemeCode: '', currentNav: 0, status: 'active', createdAt: 1, updatedAt: 1 },
+        { id: 'e', name: 'Hand priced share', type: 'Stocks', accountId: 'mf', schemeCode: '', currentNav: 3200, status: 'active', createdAt: 1, updatedAt: 1 },
+        { id: 'f', name: 'No price at all', type: 'Other Investment', accountId: 'mf', schemeCode: '', currentNav: 0, currentValue: 0, status: 'active', createdAt: 1, updatedAt: 1 }
+      ];
+    });
+    const t = (id) => c.invPriceSource(c.inv(id)).text;
+    ok('a fresh linked holding shows its NAV date', /^\d{2}-\d{2}-\d{4}$/.test(t('a')), t('a'));
+    ok('a stale one still shows its date', t('b') === '01-06-2026', t('b'));
+    ok('but in amber', /b3701c/.test(c.invPriceSource(c.inv('b')).color), c.invPriceSource(c.inv('b')).color);
+    ok('a linked holding with no NAV yet says so', t('c') === 'no NAV yet', t('c'));
+    ok('an ETF with no scheme says "not linked"', t('d') === 'not linked', t('d'));
+    ok('a share says "by hand", because there is no NAV to link',
+      t('e') === 'by hand', t('e'));
+    ok('and it is not called "not linked", which would be a fix that does not exist',
+      t('e') !== 'not linked', t('e'));
+    ok('something with no price at all says so', t('f') === 'no price', t('f'));
+
+    const asOf = c.invPricedAsOf();
+    ok('only the genuinely fixable one is counted as unlinked', asOf.unlinked === 1,
+      String(asOf.unlinked));
+    ok('and the linked ones are counted', asOf.linked === 2, String(asOf.linked));
+
+    c.state.tab = 'Investments';
+    const v = c.investVals(c.balances());
+    ok('every row has a cell for every column',
+      v.tableRows.every((r) => r.cells.length === v.tableCols.length),
+      v.tableRows[0].cells.length + ' vs ' + v.tableCols.length);
+    ok('and none shows NaN',
+      v.tableRows.every((r) => r.cells.every((x) => !/NaN|undefined/.test(String(x.text || '')))),
+      JSON.stringify(v.tableRows.map((r) => r.cells.map((x) => x.text))).slice(0, 200));
+  }
+
+  console.log('\nA rate that rounds to zero is not printed as a loss');
+  {
+    /* -0.00% reads as a loss. It is not one: it is zero with a minus sign,
+       which is what a solver returns when the gain is nil. */
+    const c = withFundSearch(book());
+    c.openInvestment('add', {});
+    c.dlgSet({ name: 'Flat', type: 'Lump Sum', buyDate: '2026-01-15', buyAmount: 50000, buyNav: 100 });
+    c.saveInvestment();
+    c.mutate((db) => { db.investments[0].currentNav = 100; });
+    c.state.tab = 'Investments';
+    const v = c.investVals(c.balances());
+    const xirrCol = v.tableCols.findIndex((x) => x.label === 'XIRR');
+    const retCol = v.tableCols.findIndex((x) => x.label === 'Return');
+    ok('XIRR does not render as -0.00%', v.tableRows[0].cells[xirrCol].text !== '-0.00%',
+      v.tableRows[0].cells[xirrCol].text);
+    ok('nor does the return', v.tableRows[0].cells[retCol].text !== '-0.00%',
+      v.tableRows[0].cells[retCol].text);
+    ok('no cell anywhere carries a negative zero',
+      !/-0\.00%/.test(JSON.stringify(v)), (JSON.stringify(v).match(/-0\.00%/) || [''])[0]);
+    ok('and no panel does either',
+      v.panels.every((p) => !/-0\.00%/.test(String(p.value) + String(p.note))),
+      JSON.stringify(v.panels.map((p) => p.value)));
+
+    /* A real loss still shows its minus sign. */
+    c.mutate((db) => { db.investments[0].currentNav = 90; });
+    const v2 = c.investVals(c.balances());
+    ok('a real loss is still negative', /^-\d/.test(v2.tableRows[0].cells[retCol].text),
+      v2.tableRows[0].cells[retCol].text);
+  }
+
   console.log('\n' + (fails ? fails + ' FAILURE(S)' : 'all checks passed'));
   process.exit(fails ? 1 : 0);
 })().catch((e) => { console.error(e); process.exit(1); });

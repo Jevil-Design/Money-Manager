@@ -1759,6 +1759,16 @@ function mmCardCycle(stmtDayRaw, dueDayRaw, asOf, dueNextMonth) {
    overflows — 31 Jan + 1 month becomes 3 March, because 31 February rolls
    forward — which silently skips a month in loan schedules, recurring dates
    and NAV period windows. nextDate() has always clamped; this now matches it. */
+/* A percentage for the screen. Three things it fixes: a rate that rounds to
+   zero from below prints as "-0.00%", which reads as a loss when it is not
+   one; a rate that cannot be computed must be a dash rather than a number;
+   and nothing may ever reach the screen as NaN. */
+function mmPct(v, dp, sign) {
+  if (v === null || v === undefined || !isFinite(+v)) return '\u2014';
+  var s = (+v).toFixed(dp === undefined ? 2 : dp);
+  if (/^-0(\.0*)?$/.test(s)) s = s.slice(1);
+  return (sign && +s > 0 ? '+' : '') + s + '%';
+}
 function mmAddM(s, n) {
   var d = mmParse(s), dom = d.getDate();
   var y = d.getFullYear(), m = d.getMonth() + (parseInt(n, 10) || 0);
@@ -5186,7 +5196,7 @@ class Component extends DCLogic {
           pf.rows.length ? mmInr(pf.totals.value) : '—',
           pf.rows.length
             ? (pf.totals.gain >= 0 ? '+' : '') + mmInr(pf.totals.gain) +
-              (pf.totals.invested > 0 ? '  ·  ' + pf.totals.returnPct.toFixed(1) + '%' : '')
+              (pf.totals.invested > 0 ? '  ·  ' + mmPct(pf.totals.returnPct, 1) : '')
             : 'nothing invested yet',
           pfColour, goInvest('holdings')),
         block('SIPs due',
@@ -5239,7 +5249,7 @@ class Component extends DCLogic {
              honestly be computed shows as a dash rather than as 0%. */
           var pct = r.st.invested > 0 ? r.st.returnPct : null;
           return self.dashRow(
-            pct === null ? '—' : (pct >= 0 ? '+' : '') + pct.toFixed(1) + '%',
+            mmPct(pct, 1, true),
             r.inv.name + ' · ' + (r.inv.type || ''),
             mmInr(r.st.value), {
               go: function () { self.setState({ tab: 'Investments', invView: 'holdings' }); },
@@ -6621,22 +6631,69 @@ class Component extends DCLogic {
     this.refreshInvestmentNavs(true);
   }
 
+  /* Where one holding's price comes from, and how current it is. A holding
+     whose value never moves is the commonest "it isn't tracking" — and the
+     reason is almost always that no scheme is linked to it, which the screen
+     used to say nowhere. */
+  invPriceSource(inv) {
+    var today = mmIso(new Date());
+    if (inv.schemeCode && inv.navDate) {
+      var age = mmDaysBetween(inv.navDate, today);
+      return {
+        linked: true, text: mmDmy(inv.navDate),
+        color: age > 7 ? 'var(--c-b3701c)' : 'var(--c-5b7186)',
+        title: 'NAV published ' + mmNiceDate(inv.navDate) + (age > 7 ? ', more than a week ago' : '')
+      };
+    }
+    if (inv.schemeCode) {
+      return {
+        linked: true, text: 'no NAV yet', color: 'var(--c-b3701c)',
+        title: 'Linked to scheme ' + inv.schemeCode + ', but no NAV has been fetched yet. Use Refresh prices.'
+      };
+    }
+    if (mmHasScheme(inv.type)) {
+      /* Fixable, and worth saying so: this kind does have a scheme to link. */
+      return {
+        linked: false, text: 'not linked', color: 'var(--c-a3241f)',
+        title: 'No scheme is linked, so this price never changes on its own. Edit the holding and search for it.'
+      };
+    }
+    if (+inv.currentNav > 0 || +inv.currentValue > 0) {
+      return {
+        linked: false, text: 'by hand', color: 'var(--c-5b7186)',
+        title: 'Valued at the price you entered. There is no daily NAV for this kind.'
+      };
+    }
+    return {
+      linked: false, text: 'no price', color: 'var(--c-b3701c)',
+      title: 'No price has been entered, so this is shown at what it cost.'
+    };
+  }
+
   /* How current the portfolio's prices actually are. Reported rather than
      assumed: the oldest price is the one that limits the whole figure. */
   invPricedAsOf() {
     var self = this;
     return this.cache('invasof', function () {
-      var oldest = '', newest = '', linked = 0, manual = 0, unpriced = 0;
+      var oldest = '', newest = '', linked = 0, manual = 0, unpriced = 0, unlinked = 0;
       (self.state.db.investments || []).forEach(function (inv) {
         if (inv.status === 'closed' || inv.status === 'sold') return;
         if (inv.schemeCode && inv.navDate) {
           linked++;
           if (!oldest || inv.navDate < oldest) oldest = inv.navDate;
           if (inv.navDate > newest) newest = inv.navDate;
-        } else if (+inv.currentNav > 0 || +inv.currentValue > 0) manual++;
+          return;
+        }
+        /* A kind that COULD be linked but is not is its own case: it is the
+           one the owner can fix, and the one that looks broken until they do. */
+        if (!inv.schemeCode && mmHasScheme(inv.type)) unlinked++;
+        if (+inv.currentNav > 0 || +inv.currentValue > 0) manual++;
         else unpriced++;
       });
-      return { oldest: oldest, newest: newest, linked: linked, manual: manual, unpriced: unpriced };
+      return {
+        oldest: oldest, newest: newest, linked: linked,
+        manual: manual, unpriced: unpriced, unlinked: unlinked
+      };
     });
   }
 
@@ -6868,11 +6925,11 @@ class Component extends DCLogic {
       this.panel({ label: 'Worth today', value: mmInr(st.value), color: 'var(--c-14416e)' }),
       this.panel({ label: 'Gain / loss', value: mmInr(st.gain), color: gainColour }),
       this.panel({
-        label: 'Return', value: st.invested > 0 ? st.returnPct.toFixed(2) + '%' : '—',
+        label: 'Return', value: st.invested > 0 ? mmPct(st.returnPct) : '—',
         color: gainColour, note: 'on what is still in'
       }),
       this.panel({
-        label: 'XIRR', value: st.xirr === null ? '—' : st.xirr.toFixed(2) + '%',
+        label: 'XIRR', value: mmPct(st.xirr),
         note: st.xirr === null ? 'needs dated flows and a value' : 'annualised, by actual dates'
       })
     ];
@@ -6906,8 +6963,8 @@ class Component extends DCLogic {
       bars = per.rows.map(function (r) {
         return {
           name: r.label + '  ·  from ' + mmDmy(r.from) +
-            (r.cagr === null ? '' : '  ·  ' + r.cagr.toFixed(2) + '% a year'),
-          value: (r.pct >= 0 ? '+' : '') + r.pct.toFixed(2) + '%',
+            (r.cagr === null ? '' : '  ·  ' + mmPct(r.cagr) + ' a year'),
+          value: mmPct(r.pct, 2, true),
           pct: maxAbs ? Math.round((Math.abs(r.pct) / maxAbs) * 100) + '%' : '0%',
           barStyle: 'position:absolute;left:0;top:0;bottom:0;width:' +
             (maxAbs ? Math.max(1, (Math.abs(r.pct) / maxAbs) * 100) : 0) + '%;background:' +
@@ -7004,7 +7061,8 @@ class Component extends DCLogic {
       var gainColour = st.gain > 0 ? 'var(--c-1a6b3c)' : st.gain < 0 ? 'var(--c-a3241f)' : 'var(--c-4a5b6b)';
       /* An unavailable XIRR is a dash, never a zero — zero is a real rate and
          would read as "this earned nothing". */
-      var xirr = st.xirr === null ? '—' : st.xirr.toFixed(2) + '%';
+      var xirr = mmPct(st.xirr);
+      var priced = self.invPriceSource(inv);
       return {
         key: inv.id,
         go: function () { self.openInvDetail(inv); },
@@ -7015,8 +7073,11 @@ class Component extends DCLogic {
           self.tcell(mmInr(st.invested), '120px', 'right'),
           self.tcell(mmInr(st.value), '120px', 'right'),
           self.tcell(mmInr(st.gain), '120px', 'right', { color: gainColour }),
-          self.tcell(st.invested > 0 ? st.returnPct.toFixed(2) + '%' : '—', '92px', 'right', { color: gainColour }),
+          self.tcell(st.invested > 0 ? mmPct(st.returnPct) : '—', '92px', 'right', { color: gainColour }),
           self.tcell(xirr, '92px', 'right'),
+          /* Why the number above is what it is. Without this a holding that
+             never moves looks broken rather than unlinked. */
+          self.tcell(priced.text, '104px', 'left', { color: priced.color }),
           self.tcell(inv.status || 'active', '84px'),
           self.tacts([
             { label: 'Open', go: function (e) { e.stopPropagation(); self.openInvDetail(inv); } },
@@ -7051,12 +7112,12 @@ class Component extends DCLogic {
       this.panel({ label: 'Gain / loss', value: mmInr(t.gain), color: gainColour, note: priceNote }),
       this.panel({
         label: 'Overall return',
-        value: t.invested > 0 ? t.returnPct.toFixed(2) + '%' : '—',
+        value: t.invested > 0 ? mmPct(t.returnPct) : '—',
         color: gainColour, note: priceNote
       }),
       this.panel({
         label: 'XIRR',
-        value: t.xirr === null ? '—' : t.xirr.toFixed(2) + '%',
+        value: mmPct(t.xirr),
         note: t.xirr === null ? 'needs dated buys and a value'
           : 'annualised to ' + mmNiceDate(today)
       }),
@@ -7091,8 +7152,8 @@ class Component extends DCLogic {
         this.tcol('Investment', '200px'), this.tcol('Type', '150px'),
         this.tcol('Invested', '120px', 'right'), this.tcol('Current value', '120px', 'right'),
         this.tcol('Gain / loss', '120px', 'right'), this.tcol('Return', '92px', 'right'),
-        this.tcol('XIRR', '92px', 'right'), this.tcol('Status', '84px'),
-        this.tcol('Actions', '250px', 'right')
+        this.tcol('XIRR', '92px', 'right'), this.tcol('Priced', '104px'),
+        this.tcol('Status', '84px'), this.tcol('Actions', '250px', 'right')
       ],
       tableRows: rows, tableEmpty: rows.length === 0,
       emptyMsg: 'Nothing invested yet. Add a mutual fund, deposit or anything else you hold.',
@@ -7111,6 +7172,10 @@ class Component extends DCLogic {
           : '') +
         (asOf.manual ? asOf.manual + ' holding(s) are valued at what you entered. ' : '') +
         (asOf.unpriced ? asOf.unpriced + ' have no price yet and are shown at cost. ' : '') +
+        (asOf.unlinked
+          ? asOf.unlinked + ' holding(s) show “not linked”: no scheme is attached, so their value never ' +
+            'changes on its own. Open one, choose Edit, and search for it to link it. '
+          : '') +
         (priceStale ? 'The oldest price here is more than a week old — Refresh prices to bring it forward.' : '')
     };
   }
@@ -7122,7 +7187,12 @@ class Component extends DCLogic {
     var cash = this.state.db.accounts.filter(function (a) {
       return !a.archived && (a.type === 'bank' || a.type === 'cash' || a.type === 'wallet');
     })[0];
-    var base = mode === 'edit' ? mmClone(preset) : {
+    /* The search box is offered when editing too — linking a scheme to a
+       holding that has none is the fix for one that never moves — so the
+       transient search fields have to exist in both modes. Left undefined,
+       the input starts uncontrolled and React complains the moment you type. */
+    var searchFields = { fundQuery: '', fundResults: null, fundBusy: false, fundError: '' };
+    var base = mode === 'edit' ? Object.assign(mmClone(preset), searchFields) : {
       id: '', name: '', type: 'Lump Sum', institution: '', folio: '',
       schemeCode: '', isin: '', amc: '', plan: '', option: '', fundName: '',
       currentNav: 0, navDate: '', currentValue: 0, accountId: '',
@@ -8254,7 +8324,7 @@ class Component extends DCLogic {
       }).filter(Boolean).sort(function (a, b) { return b.b.value - a.b.value; });
       var maxA = groupsA.reduce(function (m2, x) { return Math.max(m2, x.b.value); }, 0);
       bars = groupsA.map(function (x) {
-        return mkBar(x.label + '  ·  ' + x.b.share.toFixed(1) + '%', x.b.value, maxA,
+        return mkBar(x.label + '  ·  ' + mmPct(x.b.share, 1), x.b.value, maxA,
           function () { self.setState({ tab: 'Investments', invView: 'holdings' }); },
           x.b.gain < 0 ? 'linear-gradient(var(--c-e08b83),var(--c-c1544a))' : null);
       });
@@ -8271,8 +8341,8 @@ class Component extends DCLogic {
             self.tcell(mmInr(x.b.invested), '130px', 'right'),
             self.tcell(mmInr(x.b.value), '130px', 'right', { bold: true }),
             self.tcell(mmInr(x.b.gain), '130px', 'right', { color: col }),
-            self.tcell(x.b.invested > 0 ? x.b.returnPct.toFixed(2) + '%' : '—', '90px', 'right', { color: col }),
-            self.tcell(x.b.share.toFixed(1) + '%', '90px', 'right', { bold: true }),
+            self.tcell(x.b.invested > 0 ? mmPct(x.b.returnPct) : '—', '90px', 'right', { color: col }),
+            self.tcell(mmPct(x.b.share, 1), '90px', 'right', { bold: true }),
             self.tcell('', 'auto')]
         };
       });
@@ -8282,7 +8352,7 @@ class Component extends DCLogic {
         this.panel({ label: 'Kinds held', value: String(groupsA.length), note: 'more kinds, less riding on any one' }),
         this.panel({
           label: 'Largest kind',
-          value: biggestA ? biggestA.b.share.toFixed(1) + '%' : '—',
+          value: biggestA ? mmPct(biggestA.b.share, 1) : '—',
           note: biggestA ? biggestA.label : 'nothing invested',
           color: biggestA && biggestA.b.share > 70 ? 'var(--c-b3701c)' : 'var(--c-14416e)'
         })
@@ -8309,9 +8379,9 @@ class Component extends DCLogic {
             self.tcell(mmInr(x.st.invested), '130px', 'right'),
             self.tcell(mmInr(x.st.value), '130px', 'right', { bold: true }),
             self.tcell(mmInr(x.st.gain), '130px', 'right', { color: col }),
-            self.tcell(x.st.invested > 0 ? x.st.returnPct.toFixed(2) + '%' : '—', '90px', 'right', { color: col }),
+            self.tcell(x.st.invested > 0 ? mmPct(x.st.returnPct) : '—', '90px', 'right', { color: col }),
             /* A rate that cannot be computed is a dash. Zero is a real rate. */
-            self.tcell(x.st.xirr === null ? '—' : x.st.xirr.toFixed(2) + '%', '90px', 'right'),
+            self.tcell(mmPct(x.st.xirr), '90px', 'right'),
             self.tcell(x.inv.navDate ? mmDmy(x.inv.navDate) : 'entered by hand', '110px', 'left',
               { color: x.inv.navDate ? 'var(--c-5b7186)' : 'var(--c-b3701c)' }),
             self.tcell('', 'auto')]
@@ -8328,12 +8398,12 @@ class Component extends DCLogic {
         this.panel({ label: 'Worth today', value: mmInr(pfP.totals.value), color: 'var(--c-14416e)' }),
         this.panel({
           label: 'Gain / loss', value: mmInr(pfP.totals.gain),
-          note: pfP.totals.invested > 0 ? pfP.totals.returnPct.toFixed(2) + '%' : 'nothing invested',
+          note: pfP.totals.invested > 0 ? mmPct(pfP.totals.returnPct) : 'nothing invested',
           color: pfP.totals.gain > 0 ? 'var(--c-1a6b3c)' : pfP.totals.gain < 0 ? 'var(--c-a3241f)' : 'var(--c-14416e)'
         }),
         this.panel({
           label: 'Portfolio XIRR',
-          value: pfP.totals.xirr === null ? '—' : pfP.totals.xirr.toFixed(2) + '%',
+          value: mmPct(pfP.totals.xirr),
           note: pfP.totals.xirr === null ? 'needs dated purchases and a value' : 'every flow together, not an average'
         }),
         this.panel({
