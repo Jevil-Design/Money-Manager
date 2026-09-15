@@ -1994,6 +1994,132 @@ function withFundSearch(c, result) {
       String(c.inv('manual').currentValue));
   }
 
+  /* ------------------------------------------------------- ETFs and shares */
+
+  const NIFTY_BEES = {
+    schemeCode: '140084', isin: 'INF204KB14I2', isinEffective: 'INF204KB14I2',
+    name: 'Nippon India ETF Nifty 50 BeES', amc: 'Nippon India Mutual Fund',
+    plan: 'Direct Plan', option: '', nav: 266.8817, navDate: '2026-09-11'
+  };
+
+  console.log('\nAn ETF can be looked up, because an ETF is a scheme');
+  {
+    /* An Indian ETF is a mutual fund scheme: scheme code, ISIN, daily NAV.
+       The catalogue has always held them; the dialog just never offered the
+       search unless the kind was in the mutual-fund group. */
+    const c = withFundSearch(book(), { funds: [NIFTY_BEES], count: 1, catalogue: { stale: false } });
+
+    ['ETF', 'Gold ETF'].forEach((kind) => {
+      c.openInvestment('add', {});
+      c.dlgSet({ type: kind });
+      const v = c.dlgVals();
+      const json = JSON.stringify(v.dlgFields);
+      ok('a "' + kind + '" holding is offered the search', /Find the ETF/.test(json),
+        json.slice(0, 200));
+      ok('and is told what to type', /Nifty BeES|Bharat Bond/.test(json), kind);
+    });
+
+    /* The kinds that are funds keep their own wording. */
+    c.openInvestment('add', {});
+    c.dlgSet({ type: 'Lump Sum' });
+    ok('a mutual fund still says "Find the fund"',
+      /Find the fund/.test(JSON.stringify(c.dlgVals().dlgFields)));
+
+    /* A listed holding has no scheme to find, and is not offered one. */
+    ['Stocks', 'REIT', 'InvIT', 'Bonds'].forEach((kind) => {
+      c.openInvestment('add', {});
+      c.dlgSet({ type: kind });
+      const json = JSON.stringify(c.dlgVals().dlgFields);
+      ok('a "' + kind + '" holding is not offered a scheme search',
+        !/Find the (ETF|fund)/.test(json), kind);
+      ok('and is asked for a price per share instead',
+        /per share/.test(json), kind + ': ' + json.slice(0, 160));
+    });
+
+    /* Nor do the kinds that have no market price at all. */
+    ['Fixed Deposit', 'PPF'].forEach((kind) => {
+      c.openInvestment('add', {});
+      c.dlgSet({ type: kind });
+      ok('a "' + kind + '" holding is not offered a scheme search',
+        !/Find the (ETF|fund)/.test(JSON.stringify(c.dlgVals().dlgFields)), kind);
+    });
+  }
+
+  console.log('\nBuying an ETF works exactly like buying a fund');
+  {
+    const c = withFundSearch(book(), { funds: [NIFTY_BEES], count: 1, catalogue: { stale: false } });
+    c.openInvestment('add', {});
+    c.dlgSet({ type: 'ETF', fundQuery: 'nifty bees' });
+    await c.invFundSearch();
+    ok('the ETF is found', (c.state.dlg.data.fundResults || []).length === 1,
+      String((c.state.dlg.data.fundResults || []).length));
+
+    c.invPickFund(NIFTY_BEES);
+    const d = c.state.dlg.data;
+    ok('its scheme code is kept', d.schemeCode === '140084', d.schemeCode);
+    ok('its ISIN too', d.isin === 'INF204KB14I2', d.isin);
+    ok('and its NAV, dated', d.currentNav === 266.8817 && d.navDate === '2026-09-11',
+      d.currentNav + ' @ ' + d.navDate);
+    ok('the kind stays ETF rather than being overwritten', d.type === 'ETF', d.type);
+
+    c.dlgSet({ buyDate: '2026-03-15', buyAmount: 26688.17 });
+    c.saveInvestment();
+    const inv = c.state.db.investments[0];
+    const st = c.invState(inv);
+    ok('units were worked out from the NAV', Math.abs(st.units - 100) < 0.01, String(st.units));
+    ok('it sits in an investment account', c.acct(inv.accountId).type === 'investment',
+      c.acct(inv.accountId).type);
+    ok('the ledger entry is a transfer', c.state.db.txns[0].type === 'transfer');
+    ok('and nothing became an expense',
+      c.state.db.txns.filter((t) => t.type === 'expense').length === 0);
+
+    /* And because it carries a scheme code, everything downstream works. */
+    c.api = (url) => (/\/funds\/\d+$/.test(url)
+      ? Promise.resolve({ fund: { schemeCode: '140084', nav: 280, navDate: '2026-09-15' } })
+      : Promise.resolve({}));
+    await c.refreshInvestmentNavs();
+    ok('its price refreshes with the rest', +c.inv(inv.id).currentNav === 280,
+      String(c.inv(inv.id).currentNav));
+    const st2 = c.invState(c.inv(inv.id));
+    ok('so the gain follows the market', st2.gain > 1200, String(st2.gain));
+    ok('and XIRR is computable', st2.xirr !== null, String(st2.xirr));
+  }
+
+  console.log('\nA share is priced by hand, and says so');
+  {
+    const c = book();
+    c.openInvestment('add', {});
+    c.dlgSet({
+      name: 'Tata Consultancy Services', type: 'Stocks', institution: 'Zerodha',
+      currentNav: 3200, buyDate: '2026-01-15', buyAmount: 300000, buyNav: 3000, buyUnits: 100
+    });
+    c.saveInvestment();
+    const inv = c.state.db.investments[0];
+    const st = c.invState(inv);
+    ok('the holding is created', !!inv && inv.name === 'Tata Consultancy Services');
+    ok('with the shares held', Math.abs(st.units - 100) < 0.01, String(st.units));
+    ok('valued at shares times the price you keep', Math.abs(st.value - 320000) < 1, String(st.value));
+    ok('showing the gain', Math.abs(st.gain - 20000) < 1, String(st.gain));
+    ok('the return works', st.returnPct > 6 && st.returnPct < 7, String(st.returnPct));
+    ok('and so does XIRR', st.xirr !== null, String(st.xirr));
+    ok('the ledger entry is still a transfer', c.state.db.txns[0].type === 'transfer');
+
+    /* It has no scheme, so a price refresh leaves it alone rather than
+       pretending to have fetched something. */
+    c.api = () => Promise.resolve({});
+    await c.refreshInvestmentNavs();
+    ok('a refresh does not touch a hand-priced share', +c.inv(inv.id).currentNav === 3200,
+      String(c.inv(inv.id).currentNav));
+    ok('and says there was nothing to fetch',
+      /no holding is linked/i.test(c.state.toast || ''), c.state.toast);
+
+    c.state.tab = 'Investments';
+    const v = c.investVals(c.balances());
+    ok('the screen counts it as priced by you',
+      /valued at what you entered/.test(v.tableNote), v.tableNote);
+    ok('and does not claim a NAV for it', !/NAV of/.test(v.panels[1].note), v.panels[1].note);
+  }
+
   console.log('\n' + (fails ? fails + ' FAILURE(S)' : 'all checks passed'));
   process.exit(fails ? 1 : 0);
 })().catch((e) => { console.error(e); process.exit(1); });

@@ -1875,6 +1875,16 @@ var MM_INV_GROUPS = [
     'PPF', 'NPS', 'EPF', 'NSC', 'KVP', 'Post Office Scheme', 'Insurance / ULIP'] },
   { key: 'other', label: 'Other', unitised: false, types: ['Other Investment'] }
 ];
+/* Which kinds have a scheme in the AMFI catalogue, and so can be looked up
+   rather than priced by hand. An ETF in India IS a mutual fund scheme — it
+   has a scheme code, an ISIN and a NAV published once a working day, exactly
+   like any other fund — which is why it belongs here and a listed share does
+   not. Gold, silver, bond and index ETFs are all in the same list. */
+var MM_SCHEME_TYPES = { 'ETF': 1, 'Gold ETF': 1 };
+function mmHasScheme(type) {
+  return mmInvGroupOf(type) === 'mf' || MM_SCHEME_TYPES[String(type)] === 1;
+}
+
 var MM_INV_TYPE_GROUP = (function () {
   var m = {};
   MM_INV_GROUPS.forEach(function (g) { g.types.forEach(function (t) { m[t] = g.key; }); });
@@ -11086,7 +11096,7 @@ class Component extends DCLogic {
       ];
     } else if (d.kind === 'investment') {
       a = d.data;
-      var isMf = mmInvGroupOf(a.type) === 'mf';
+      var isMf = mmHasScheme(a.type);
       var unitised = mmInvIsUnitised(a.type);
       title = (d.mode === 'edit' ? 'Edit investment' : 'Add investment');
       width = 620;
@@ -11100,11 +11110,17 @@ class Component extends DCLogic {
       fields.push(this.fld('Kind', 'select', a.type, set('type'), { options: typeOptions }));
 
       if (isMf) {
-        /* Fund discovery. The scheme is chosen from real data, so the plan
-           and option cannot be mistyped and the NAV is not invented. */
-        fields.push(this.fld('Find the fund', 'text', a.fundQuery, set('fundQuery'), {
-          hint: 'name, AMC, scheme code or ISIN — then press Search'
-        }));
+        /* Scheme discovery. The scheme is chosen from real data, so the plan
+           and option cannot be mistyped and the NAV is not invented. The same
+           catalogue holds ETFs, because an Indian ETF is a mutual fund scheme
+           with a scheme code, an ISIN and a daily NAV like any other. */
+        var etfish = mmInvGroupOf(a.type) !== 'mf';
+        fields.push(this.fld(etfish ? 'Find the ETF' : 'Find the fund', 'text',
+          a.fundQuery, set('fundQuery'), {
+            hint: etfish
+              ? 'e.g. Nifty BeES, Gold ETF, Bharat Bond — name, scheme code or ISIN, then Search'
+              : 'name, AMC, scheme code or ISIN — then press Search'
+          }));
         fields.push(this.fld('', 'buttons', '', null, {
           buttons: [
             this.btn(a.fundBusy ? 'Searching…' : 'Search funds',
@@ -11159,8 +11175,12 @@ class Component extends DCLogic {
         fields.push(this.fld('Maturity date', 'text', a.maturityDate, set('maturityDate'),
           { type: 'date', hint: 'optional — drives the maturity tracker' }));
       } else if (!isMf) {
-        fields.push(this.fld('Current price', 'text', a.currentNav, set('currentNav'),
-          { type: 'number', hint: 'per unit, gram or share' }));
+        fields.push(this.fld('Current price', 'text', a.currentNav, set('currentNav'), {
+          type: 'number',
+          hint: mmInvGroupOf(a.type) === 'market'
+            ? 'per share \u2014 there is no daily NAV for a listed holding, so this is the price you keep'
+            : 'per unit, gram or share'
+        }));
       }
 
       if (d.mode !== 'edit') {
