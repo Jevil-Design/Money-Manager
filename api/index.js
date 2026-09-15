@@ -52,6 +52,10 @@
  *   GET    /transactions        read side, from the live document
  *   GET    /balances            read side, from the live document
  *   GET    /sync-log            recent push/pull activity
+ *   GET    /funds/search?q=     mutual fund discovery, from AMFI
+ *   GET    /funds/:code         one scheme and its latest NAV
+ *   GET    /funds/:code/history the NAV series
+ *   POST   /funds/refresh       pull the catalogue again
  *
  * The database is the only home for a user's books: the browser keeps just a
  * session token.  PUT /state carries the revision it was based on so two
@@ -576,13 +580,37 @@ CREATE TABLE IF NOT EXISTS mm_rate (
   created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS mm_rate_bucket_idx ON mm_rate (bucket, created_at DESC);
+
+/* --- the mutual fund catalogue ----------------------------------------------
+   Reference data, not user data: one shared copy of every scheme AMFI
+   publishes, so it has no user_id and is not encrypted — it is the same
+   public file for everyone and holds nothing about anybody.
+
+   AMFI is the authority for Indian mutual fund NAV, publishes daily, and
+   needs no API key — which is the best possible answer to "never expose API
+   credentials in frontend code": there is no credential to expose. */
+CREATE TABLE IF NOT EXISTS mm_fund (
+  scheme_code TEXT PRIMARY KEY,
+  isin        TEXT NOT NULL DEFAULT '',
+  isin_reinv  TEXT NOT NULL DEFAULT '',
+  name        TEXT NOT NULL,
+  amc         TEXT NOT NULL DEFAULT '',
+  plan_name   TEXT NOT NULL DEFAULT '',
+  option_name TEXT NOT NULL DEFAULT '',
+  nav         NUMERIC(18,4),
+  nav_date    DATE,
+  updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS mm_fund_isin_idx ON mm_fund (isin);
+CREATE INDEX IF NOT EXISTS mm_fund_name_idx ON mm_fund (lower(name));
+CREATE INDEX IF NOT EXISTS mm_fund_amc_idx ON mm_fund (lower(amc));
 `;
 
 /* Bump when SCHEMA changes, so /health reports what a given database has had
    applied.  It is a record, not a gate: every statement in SCHEMA is
    CREATE/ALTER ... IF NOT EXISTS, so re-running the whole thing is safe,
    concurrent-safe, and never touches a row of data. */
-const SCHEMA_VERSION = '5';
+const SCHEMA_VERSION = '6';
 
 /* The tables are created on first use rather than by a separate migration
    step, so deploying needs nothing but a connection string.  Every statement
@@ -969,6 +997,227 @@ async function noteFailure(client, user) {
 }
 async function clearFailures(client, userId) {
   await query(client, 'UPDATE mm_user SET fail_count = 0, locked_until = NULL WHERE id = $1', [userId]).catch(() => {});
+}
+
+/* ==========================================================================
+   MutualFundService
+
+   One place that knows where fund data comes from, so the provider can be
+   swapped without touching a line of UI:
+
+     searchFunds(query)          find schemes by name, AMC, code or ISIN
+     getFundDetails(schemeCode)  one scheme, with its latest NAV
+     getLatestNAV(schemeCode)    NAV and the date it is FOR
+     getHistoricalNAV(code)      the NAV series, for performance figures
+     refreshNAV()                pull the catalogue again
+
+   The source is AMFI's own daily NAVAll.txt — the authority for Indian mutual
+   funds, free, and with no API key, so there is no credential that could leak
+   into frontend code. History comes from mfapi.in, which republishes AMFI's
+   archive; it is the one piece that could be swapped for a paid provider.
+
+   NAV IS NOT LIVE AND IS NEVER PRESENTED AS LIVE. AMFI publishes once a day
+   after markets close, so the newest NAV is routinely one to three days old
+   over a weekend or holiday. Every response carries navDate and staleDays so
+   the UI can say "as of" rather than implying a ticking price.
+   ========================================================================== */
+
+const AMFI_URL = 'https://www.amfiindia.com/spages/NAVAll.txt';
+const MFAPI_URL = 'https://api.mfapi.in/mf/';
+/* How old the cached catalogue may get before a search refreshes it. AMFI
+   publishes once a working day; 12 hours keeps it current without hammering
+   them from every cold container. */
+/* Self-contained rather than via intEnv: this block sits above that helper,
+   and a const arrow function cannot be called before its declaration. */
+const FUND_CACHE_HOURS = (function () {
+  const n = parseInt(process.env.FUND_CACHE_HOURS || '', 10);
+  return isFinite(n) && n >= 0 ? n : 12;
+})();
+
+/* AMFI writes dates as 11-Sep-2026. */
+const AMFI_MON = {
+  jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6,
+  jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12
+};
+function amfiDate(s) {
+  const m = String(s || '').trim().match(/^(\d{1,2})-([A-Za-z]{3})-(\d{4})$/);
+  if (!m) return null;
+  const mon = AMFI_MON[m[2].toLowerCase()];
+  if (!mon) return null;
+  return m[3] + '-' + String(mon).padStart(2, '0') + '-' + String(+m[1]).padStart(2, '0');
+}
+
+/* Parse NAVAll.txt.
+   Columns: code;isin;isinReinvest;name;plan;option;nav;date
+   The AMC is not a column — it appears as a bare line above each block, so it
+   is carried down as the file is walked. */
+function parseAmfi(text) {
+  const out = [];
+  let amc = '';
+  const lines = String(text).split(/\r?\n/);
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (!line || !line.trim()) continue;
+    if (line.indexOf(';') < 0) {
+      /* A heading. The AMC lines end in "Mutual Fund"; the scheme-type
+         headings ("Open Ended Schemes(...)") must not overwrite it. */
+      const t = line.trim();
+      if (/mutual fund\s*$/i.test(t)) amc = t;
+      continue;
+    }
+    if (/^Scheme Code/i.test(line)) continue;
+    const f = line.split(';');
+    if (f.length < 8) continue;
+    const code = f[0].trim();
+    if (!/^\d+$/.test(code)) continue;
+    const nav = parseFloat(f[6]);
+    const dash = (v) => { const s = String(v || '').trim(); return s === '-' || s === 'N.A.' ? '' : s; };
+    out.push({
+      schemeCode: code,
+      isin: dash(f[1]),
+      isinReinv: dash(f[2]),
+      name: f[3].trim(),
+      plan: f[4].trim(),
+      option: f[5].trim(),
+      amc: amc,
+      nav: isFinite(nav) && nav > 0 ? nav : null,
+      navDate: amfiDate(f[7])
+    });
+  }
+  return out;
+}
+
+/* How stale is a NAV, in days? Weekends and holidays make this normal rather
+   than a fault, so it is reported rather than warned about. */
+function staleDays(navDate) {
+  if (!navDate) return null;
+  const then = Date.parse(navDate + 'T00:00:00Z');
+  if (!isFinite(then)) return null;
+  const today = Date.parse(new Date().toISOString().slice(0, 10) + 'T00:00:00Z');
+  return Math.max(0, Math.round((today - then) / 86400000));
+}
+
+function fundRow(r) {
+  const navDate = r.nav_date ? new Date(r.nav_date).toISOString().slice(0, 10) : null;
+  return {
+    schemeCode: r.scheme_code,
+    isin: r.isin || '',
+    isinReinvest: r.isin_reinv || '',
+    name: r.name,
+    amc: r.amc || '',
+    plan: r.plan_name || '',
+    option: r.option_name || '',
+    nav: r.nav == null ? null : Number(r.nav),
+    navDate: navDate,
+    staleDays: staleDays(navDate),
+    updatedAt: r.updated_at
+  };
+}
+
+async function fundCacheAge(client) {
+  const { rows } = await query(client,
+    'SELECT COUNT(*)::int AS n, MAX(updated_at) AS newest FROM mm_fund', []);
+  const n = rows.length ? Number(rows[0].n) || 0 : 0;
+  const newest = rows.length && rows[0].newest ? new Date(rows[0].newest).getTime() : 0;
+  return { count: n, ageHours: newest ? (Date.now() - newest) / 3600000 : Infinity };
+}
+
+/* Pull the catalogue and store it. Returns what happened, never throws for a
+   provider problem — a stale catalogue is far better than a broken search. */
+async function refreshFunds(client, opts) {
+  const force = !!(opts && opts.force);
+  const age = await fundCacheAge(client);
+  if (!force && age.count > 0 && age.ageHours < FUND_CACHE_HOURS) {
+    return { refreshed: false, reason: 'cache is fresh', count: age.count, ageHours: age.ageHours };
+  }
+
+  let text = '';
+  try {
+    const res = await fetch(AMFI_URL, { headers: { Accept: 'text/plain' } });
+    if (!res.ok) throw new Error('AMFI returned HTTP ' + res.status);
+    text = await res.text();
+  } catch (err) {
+    console.error('money-manager funds: could not reach AMFI — ' + scrub(err && err.message));
+    return {
+      refreshed: false, failed: true, count: age.count,
+      reason: 'the fund data service could not be reached'
+    };
+  }
+
+  const funds = parseAmfi(text);
+  if (funds.length < 1000) {
+    /* A truncated or changed file must not wipe a good catalogue. */
+    console.error('money-manager funds: AMFI returned only ' + funds.length +
+      ' schemes, which looks wrong — keeping the existing catalogue.');
+    return {
+      refreshed: false, failed: true, count: age.count,
+      reason: 'the fund data looked incomplete and was not used'
+    };
+  }
+
+  /* Upsert in batches: one statement per row would be 14,000 round trips. */
+  let written = 0;
+  const BATCH = 400;
+  for (let i = 0; i < funds.length; i += BATCH) {
+    const slice = funds.slice(i, i + BATCH);
+    const values = [];
+    const params = [];
+    slice.forEach((f, j) => {
+      const b = j * 9;
+      values.push('($' + (b + 1) + ',$' + (b + 2) + ',$' + (b + 3) + ',$' + (b + 4) + ',$' +
+        (b + 5) + ',$' + (b + 6) + ',$' + (b + 7) + ',$' + (b + 8) + ',$' + (b + 9) + ')');
+      params.push(f.schemeCode, f.isin, f.isinReinv, f.name, f.amc, f.plan, f.option, f.nav, f.navDate);
+    });
+    await query(client,
+      'INSERT INTO mm_fund (scheme_code, isin, isin_reinv, name, amc, plan_name, option_name, nav, nav_date) VALUES ' +
+      values.join(',') +
+      ` ON CONFLICT (scheme_code) DO UPDATE SET
+          isin = excluded.isin, isin_reinv = excluded.isin_reinv, name = excluded.name,
+          amc = excluded.amc, plan_name = excluded.plan_name, option_name = excluded.option_name,
+          nav = excluded.nav, nav_date = excluded.nav_date, updated_at = now()`,
+      params);
+    written += slice.length;
+  }
+  return { refreshed: true, count: written };
+}
+
+/* Find schemes. Every word in the query must appear somewhere in the scheme
+   name, the AMC, the plan or the option — so "parag parikh direct growth"
+   narrows to exactly one scheme rather than returning everything named parag. */
+async function searchFunds(client, q, limit) {
+  const text = String(q || '').trim();
+  if (text.length < 2) return [];
+  const max = Math.min(50, Math.max(1, parseInt(limit, 10) || 25));
+
+  /* An exact scheme code or ISIN is an exact answer. */
+  if (/^\d{4,7}$/.test(text)) {
+    const { rows } = await query(client, 'SELECT * FROM mm_fund WHERE scheme_code = $1', [text]);
+    if (rows.length) return rows.map(fundRow);
+  }
+  if (/^INF[A-Z0-9]{9}$/i.test(text)) {
+    const { rows } = await query(client,
+      'SELECT * FROM mm_fund WHERE upper(isin) = $1 OR upper(isin_reinv) = $1 LIMIT $2',
+      [text.toUpperCase(), max]);
+    if (rows.length) return rows.map(fundRow);
+  }
+
+  const words = text.toLowerCase().split(/\s+/).filter(Boolean).slice(0, 8);
+  const where = [];
+  const params = [];
+  words.forEach((w) => {
+    params.push('%' + w + '%');
+    const p = '$' + params.length;
+    where.push('(lower(name) LIKE ' + p + ' OR lower(amc) LIKE ' + p +
+      ' OR lower(plan_name) LIKE ' + p + ' OR lower(option_name) LIKE ' + p + ')');
+  });
+  params.push(max);
+  const { rows } = await query(client,
+    'SELECT * FROM mm_fund WHERE ' + where.join(' AND ') +
+    /* Schemes still being priced first, then alphabetically so the Direct and
+       Regular variants of one fund sit together. */
+    ' ORDER BY (nav IS NULL), name, plan_name, option_name LIMIT $' + params.length,
+    params);
+  return rows.map(fundRow);
 }
 
 /* ------------------------------------------------- encryption at rest
@@ -2476,6 +2725,100 @@ async function handleRequest(req, res) {
             [user.id, KEEP_SNAPSHOTS]).catch(() => {});
         }
         return send(res, 200, { rev: nextRev, savedAt: nowIso(), transactions: data.txns.length, bytes: Buffer.byteLength(json) });
+      }
+
+      /* ---- mutual funds -----------------------------------------------
+         Reference data behind the session, so the deployment is not a free
+         public proxy for someone else's traffic. No key is involved at any
+         point: AMFI is open, which is the strongest possible answer to
+         "never expose API credentials in frontend code". */
+      if (route === 'funds/search' && method === 'GET') {
+        const q = (req.query && req.query.q) || '';
+        /* Refresh on demand when the catalogue is missing or stale, so there
+           is nothing to schedule and nothing to forget. A failure here leaves
+           the previous catalogue in place rather than emptying it. */
+        const state = await refreshFunds(client, {});
+        const results = await searchFunds(client, q, req.query && req.query.limit);
+        return send(res, 200, {
+          query: String(q || ''),
+          count: results.length,
+          funds: results,
+          source: 'AMFI',
+          /* Said plainly so the UI never implies a live price. */
+          navNote: 'AMFI publishes NAV once each working day. Each result carries the date its NAV is for.',
+          catalogue: {
+            refreshed: !!state.refreshed,
+            schemes: state.count || 0,
+            stale: !!state.failed,
+            note: state.failed
+              ? 'Could not refresh the fund list just now — showing the last one downloaded.'
+              : null
+          }
+        });
+      }
+
+      if (route === 'funds/refresh' && method === 'POST') {
+        const state = await refreshFunds(client, { force: true });
+        if (state.failed) {
+          return send(res, 503, {
+            error: 'Unable to refresh fund data just now. The last downloaded list is still in use.',
+            code: 'funds_unavailable',
+            schemes: state.count || 0
+          });
+        }
+        return send(res, 200, { refreshed: !!state.refreshed, schemes: state.count || 0, source: 'AMFI' });
+      }
+
+      if (/^funds\/\d+$/.test(route) && method === 'GET') {
+        const code = route.split('/')[1];
+        await refreshFunds(client, {});
+        const { rows } = await query(client, 'SELECT * FROM mm_fund WHERE scheme_code = $1', [code]);
+        if (!rows.length) {
+          return send(res, 404, {
+            error: 'No scheme with that code is in the fund list.',
+            code: 'fund_not_found'
+          });
+        }
+        return send(res, 200, { fund: fundRow(rows[0]), source: 'AMFI' });
+      }
+
+      /* The NAV series, for performance figures. Proxied rather than stored:
+         it is large, rarely needed, and the app should not carry a second
+         copy of somebody else's archive. */
+      if (/^funds\/\d+\/history$/.test(route) && method === 'GET') {
+        const code = route.split('/')[1];
+        let payload = null;
+        try {
+          const r = await fetch(MFAPI_URL + encodeURIComponent(code), { headers: { Accept: 'application/json' } });
+          if (r.ok) payload = await r.json();
+          else console.error('money-manager funds: history provider returned HTTP ' + r.status);
+        } catch (err) {
+          console.error('money-manager funds: history provider unreachable — ' + scrub(err && err.message));
+        }
+        if (!payload || !Array.isArray(payload.data) || !payload.data.length) {
+          /* No invented series, ever. The caller is told there is none. */
+          return send(res, 503, {
+            error: 'Historical NAV is not available for that scheme right now.',
+            code: 'history_unavailable',
+            schemeCode: code
+          });
+        }
+        const series = payload.data.map((d) => {
+          const p = String(d.date || '').split('-');       /* dd-mm-yyyy */
+          const nav = parseFloat(d.nav);
+          return p.length === 3 && isFinite(nav) && nav > 0
+            ? { date: p[2] + '-' + p[1] + '-' + p[0], nav: nav }
+            : null;
+        }).filter(Boolean).sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+        return send(res, 200, {
+          schemeCode: code,
+          name: (payload.meta && payload.meta.scheme_name) || '',
+          points: series.length,
+          from: series.length ? series[0].date : null,
+          to: series.length ? series[series.length - 1].date : null,
+          history: series,
+          source: 'mfapi.in (AMFI archive)'
+        });
       }
 
       /* ---- identity ---- */
