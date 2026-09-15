@@ -1186,6 +1186,252 @@ function withFundSearch(c, result) {
     });
   }
 
+  /* ------------------------------------------------- one holding, on its own */
+
+  /* A published series with known values at the dates the periods land on,
+     so every percentage below can be checked by hand. Last point 11 Sep 2026. */
+  const SERIES = [
+    { date: '2021-09-10', nav: 50 },
+    { date: '2023-09-10', nav: 60 },
+    { date: '2025-09-10', nav: 80 },
+    { date: '2026-03-10', nav: 90 },
+    { date: '2026-06-10', nav: 95 },
+    { date: '2026-08-10', nav: 98 },
+    { date: '2026-09-11', nav: 100 }
+  ];
+
+  function detailBook(series) {
+    const c = withFundSearch(book());
+    c.openInvestment('add', {});
+    c.invPickFund(PPFAS);
+    c.dlgSet({ buyDate: '2026-01-15', buyAmount: 50000 });
+    c.saveInvestment();
+    const inv = c.state.db.investments[0];
+    c.api = function (url) {
+      if (url.indexOf('/history') >= 0) {
+        if (series === 'fail') return Promise.reject(Object.assign(new Error('gone'), { status: 0 }));
+        return Promise.resolve({ schemeCode: inv.schemeCode, history: series || SERIES });
+      }
+      return Promise.resolve({});
+    };
+    return { c, inv };
+  }
+
+  console.log('\nOpening a holding');
+  {
+    const { c, inv } = detailBook();
+    c.state.tab = 'Investments';
+
+    /* From the portfolio row. */
+    let v = c.investVals(c.balances());
+    v.tableRows[0].go();
+    ok('the row opens the holding rather than the edit dialog',
+      c.state.invDetail === inv.id, c.state.invDetail);
+    ok('and no dialog was opened', !c.state.dlg);
+
+    await c.loadNavHistory(inv);
+    v = c.investVals(c.balances());
+    ok('the title is the holding', v.tableTitle === inv.name, v.tableTitle);
+    ok('the subtitle carries the scheme code', /122639/.test(v.tableSub), v.tableSub);
+    ok('and the ISIN', /INF879O01027/.test(v.tableSub), v.tableSub);
+    ok('the opening purchase is listed', v.tableRows.length === 1, String(v.tableRows.length));
+    ok('with its amount', /50,000/.test(v.tableRows[0].cells[2].text), v.tableRows[0].cells[2].text);
+    ok('and its units', /^\d+\.\d{4}$/.test(v.tableRows[0].cells[3].text), v.tableRows[0].cells[3].text);
+    ok('there is a way back', /All investments/.test(JSON.stringify(v.tableTools)));
+    ok('no cell shows NaN or undefined',
+      v.tableRows[0].cells.every((x) => !/NaN|undefined|Infinity/.test(String(x.text || ''))),
+      JSON.stringify(v.tableRows[0].cells.map((x) => x.text)));
+    ok('no panel does either',
+      v.panels.every((p) => !/NaN|undefined|Infinity/.test(String(p.value) + String(p.note))),
+      JSON.stringify(v.panels.map((p) => p.value)));
+
+    /* The figures match the portfolio exactly. */
+    const st = c.invState(c.inv(inv.id));
+    ok('invested matches the portfolio', v.panels[0].value === mmInrOf(st.invested), v.panels[0].value);
+    ok('value matches', v.panels[1].value === mmInrOf(st.value), v.panels[1].value);
+    ok('gain matches', v.panels[2].value === mmInrOf(st.gain), v.panels[2].value);
+    ok('units are shown for a fund', v.panels[5].label === 'Units', v.panels[5].label);
+    ok('with the average cost', /average cost/.test(v.panels[5].note), v.panels[5].note);
+
+    v.tableTools[0].go();
+    ok('the back button returns to the portfolio', !c.state.invDetail, c.state.invDetail);
+    ok('and the portfolio table is showing again',
+      c.investVals(c.balances()).tableTitle === 'Investments');
+  }
+
+  console.log('\nPublished periods, and only the ones the series covers');
+  {
+    const { c, inv } = detailBook();
+    c.openInvDetail(inv);
+    await c.loadNavHistory(inv);
+
+    const per = c.invPeriods(c.inv(inv.id));
+    const by = {};
+    per.rows.forEach((r) => { by[r.label] = r; });
+
+    ok('six periods plus "since"', per.rows.length === 7, String(per.rows.length));
+    ok('1 month is +2.04%', by['1 month'].pct === 2.04, String(by['1 month'].pct));
+    ok('3 months is +5.26%', by['3 months'].pct === 5.26, String(by['3 months'].pct));
+    ok('6 months is +11.11%', by['6 months'].pct === 11.11, String(by['6 months'].pct));
+    ok('1 year is +25.00%', by['1 year'].pct === 25, String(by['1 year'].pct));
+    ok('3 years is +66.67%', by['3 years'].pct === 66.67, String(by['3 years'].pct));
+    ok('5 years is +100.00%', by['5 years'].pct === 100, String(by['5 years'].pct));
+
+    ok('under a year, nothing is annualised', by['1 month'].cagr === null && by['6 months'].cagr === null);
+    ok('a year is annualised at the same rate', by['1 year'].cagr === 25, String(by['1 year'].cagr));
+    ok('three years compounds to 18.56% a year', by['3 years'].cagr === 18.56,
+      String(by['3 years'].cagr));
+    ok('five years to 14.87% a year', by['5 years'].cagr === 14.87, String(by['5 years'].cagr));
+    ok('each period names the date it measures from',
+      per.rows.every((r) => /^\d{4}-\d{2}-\d{2}$/.test(r.from)),
+      JSON.stringify(per.rows.map((r) => r.from)));
+    ok('the "since" row names the first published day',
+      /Since 10-09-2021/.test(per.rows[6].label), per.rows[6].label);
+
+    const v = c.investVals(c.balances());
+    ok('they are drawn as bars', v.hasBars === true && v.bars.length === 7, String(v.bars.length));
+    ok('each bar is signed', v.bars.every((b) => /^[+-]/.test(b.value)),
+      JSON.stringify(v.bars.map((b) => b.value)));
+    ok('and annualised figures are labelled as per year',
+      /a year/.test(v.bars[3].name), v.bars[3].name);
+    ok('the note separates what the fund did from what you got',
+      /what the fund did, not what you got/.test(v.tableNote), v.tableNote);
+  }
+
+  console.log('\nA young fund has no long periods invented for it');
+  {
+    const { c, inv } = detailBook([
+      { date: '2026-06-10', nav: 95 },
+      { date: '2026-08-10', nav: 98 },
+      { date: '2026-09-11', nav: 100 }
+    ]);
+    c.openInvDetail(inv);
+    await c.loadNavHistory(inv);
+
+    const per = c.invPeriods(c.inv(inv.id));
+    const labels = per.rows.map((r) => r.label);
+    ok('one month is there', labels.indexOf('1 month') >= 0, labels.join(','));
+    ok('three months is there', labels.indexOf('3 months') >= 0, labels.join(','));
+    ok('six months is NOT, because the series does not reach back that far',
+      labels.indexOf('6 months') < 0, labels.join(','));
+    ok('nor is one year', labels.indexOf('1 year') < 0, labels.join(','));
+    ok('nor three or five', labels.indexOf('3 years') < 0 && labels.indexOf('5 years') < 0);
+    ok('nothing is annualised from three months of data',
+      per.rows.every((r) => r.cagr === null), JSON.stringify(per.rows.map((r) => r.cagr)));
+  }
+
+  console.log('\nNo history means no periods, not estimated ones');
+  {
+    const { c, inv } = detailBook('fail');
+    c.openInvDetail(inv);
+    await c.loadNavHistory(inv);
+
+    const per = c.invPeriods(c.inv(inv.id));
+    ok('no periods are produced', per.rows.length === 0, String(per.rows.length));
+    ok('the reason is given', /could not be reached/i.test(per.error), per.error);
+    const v = c.investVals(c.balances());
+    ok('no bars are drawn', v.hasBars === false && v.bars.length === 0);
+    ok('and the screen says why', /could not be reached/i.test(v.tableNote), v.tableNote);
+    ok('the holding’s own figures are unaffected',
+      v.panels[0].value === mmInrOf(50000), v.panels[0].value);
+
+    /* An empty series is different from a failure, and says so too. */
+    const b = detailBook([]);
+    b.c.openInvDetail(b.inv);
+    await b.c.loadNavHistory(b.inv);
+    ok('an empty series is reported, not treated as zero return',
+      /no published nav history/i.test(b.c.invPeriods(b.c.inv(b.inv.id)).error),
+      b.c.invPeriods(b.c.inv(b.inv.id)).error);
+  }
+
+  console.log('\nPeriods never come from the wrong scheme');
+  {
+    const { c, inv } = detailBook();
+    c.openInvDetail(inv);
+    await c.loadNavHistory(inv);
+    ok('the series is held against its scheme code', c.state.invNav.code === '122639',
+      c.state.invNav.code);
+
+    /* A second holding, a different fund, no series fetched for it yet. */
+    c.mutate((db) => {
+      db.investments.push({
+        id: 'other', name: 'Some other fund', type: 'Lump Sum', accountId: inv.accountId,
+        schemeCode: '999999', currentNav: 10, status: 'active', createdAt: 1, updatedAt: 1
+      });
+    });
+    ok('the other fund gets no periods from the first one’s series',
+      c.invPeriods(c.inv('other')) === null, JSON.stringify(c.invPeriods(c.inv('other'))));
+
+    /* A holding with no scheme at all. */
+    c.mutate((db) => {
+      db.investments.push({
+        id: 'manual', name: 'Hand-priced', type: 'Lump Sum', accountId: inv.accountId,
+        schemeCode: '', currentNav: 10, status: 'active', createdAt: 1, updatedAt: 1
+      });
+    });
+    ok('an unlinked holding gets none either', c.invPeriods(c.inv('manual')) === null);
+    c.setState({ invDetail: 'manual' });
+    const v = c.investVals(c.balances());
+    ok('and is told how to link one', /search for the fund to link one/.test(v.tableNote),
+      v.tableNote);
+  }
+
+  console.log('\nA deposit shows what a deposit has');
+  {
+    const c = book();
+    c.openInvestment('add', {});
+    c.dlgSet({
+      name: 'HDFC Fixed Deposit', type: 'Fixed Deposit', institution: 'HDFC Bank',
+      currentValue: 107000, rate: 7.1, maturityDate: '2027-09-15',
+      buyDate: '2026-09-15', buyAmount: 100000
+    });
+    c.saveInvestment();
+    const inv = c.state.db.investments[0];
+    c.openInvDetail(inv);
+    const v = c.investVals(c.balances());
+
+    ok('no units panel', v.panels.every((p) => p.label !== 'Units'),
+      JSON.stringify(v.panels.map((p) => p.label)));
+    ok('a maturity panel instead', v.panels[5].label === 'Maturity', v.panels[5].label);
+    ok('with the date', /15-09-2027/.test(v.panels[5].value), v.panels[5].value);
+    ok('and the days to go', /in 365 days/.test(v.panels[5].note), v.panels[5].note);
+    ok('the rate is shown', v.panels[6].value === '7.10%', v.panels[6].value);
+    ok('no bars, since there is no published series', v.hasBars === false);
+    ok('and it is not told to link a fund', !/search for the fund/.test(v.tableNote), v.tableNote);
+  }
+
+  console.log('\nRemoving a transaction from a holding');
+  {
+    const { c, inv } = detailBook();
+    c.openInvDetail(inv);
+    const txn = c.invTxnsFor(inv.id)[0];
+    const ledgerBefore = c.state.db.txns.length;
+
+    c.deleteInvTxn(c.inv(inv.id), txn);
+    ok('it asks first', !!c.state.confirm);
+    ok('and warns that the ledger entry stays',
+      /ledger entry is not removed/i.test(c.state.confirm.msg), c.state.confirm.msg);
+    c.state.confirm.ok();
+
+    ok('the holding’s transaction is gone', c.invTxnsFor(inv.id).length === 0);
+    ok('the ledger entry is untouched, as promised',
+      c.state.db.txns.length === ledgerBefore, String(c.state.db.txns.length));
+    ok('so what is invested falls to nothing', c.invState(c.inv(inv.id)).invested === 0,
+      String(c.invState(c.inv(inv.id)).invested));
+    ok('and the detail view still renders', !!c.investVals(c.balances()).tableEmpty);
+  }
+
+  console.log('\nA deleted holding does not strand the screen');
+  {
+    const { c, inv } = detailBook();
+    c.openInvDetail(inv);
+    c.mutate((db) => { db.investments = []; });
+    const v = c.investVals(c.balances());
+    ok('it falls back to the portfolio rather than throwing',
+      v.tableTitle === 'Investments', v.tableTitle);
+    ok('which is empty', v.tableEmpty === true);
+  }
+
   console.log('\n' + (fails ? fails + ' FAILURE(S)' : 'all checks passed'));
   process.exit(fails ? 1 : 0);
 })().catch((e) => { console.error(e); process.exit(1); });

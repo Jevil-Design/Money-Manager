@@ -6263,9 +6263,254 @@ class Component extends DCLogic {
     ];
   }
 
+  /* ---- one holding, on its own ------------------------------------------ */
+
+  openInvDetail(inv) {
+    if (!inv) return;
+    this.setState({ tab: 'Investments', invView: 'holdings', invDetail: inv.id });
+    /* The NAV series is fetched once per scheme and kept, so moving between
+       holdings does not hammer the provider. */
+    var have = this.state.invNav;
+    if (inv.schemeCode && (!have || have.code !== inv.schemeCode)) this.loadNavHistory(inv);
+    return true;
+  }
+
+  closeInvDetail() { this.setState({ invDetail: '' }); }
+
+  loadNavHistory(inv) {
+    var self = this;
+    this.setState({ invNav: { code: inv.schemeCode, series: null, error: '', busy: true } });
+    return this.api('/api/v1/funds/' + encodeURIComponent(inv.schemeCode) + '/history')
+      .then(function (r) {
+        var series = (r && r.history) || [];
+        self.setState({
+          invNav: {
+            code: inv.schemeCode, busy: false, series: series,
+            error: series.length ? '' : 'No published NAV history came back for this scheme.'
+          }
+        });
+      })
+      .catch(function (e) {
+        /* No series means no periods. Nothing is estimated in its place. */
+        self.setState({
+          invNav: {
+            code: inv.schemeCode, busy: false, series: [],
+            error: (e && e.status === 0)
+              ? 'The NAV history could not be reached, so past periods cannot be shown.'
+              : 'The NAV history is not available for this scheme, so past periods cannot be shown.'
+          }
+        });
+      });
+  }
+
+  /* Point-to-point returns from the published series. A period is shown only
+     if the series actually reaches back that far — a fund six months old has
+     no one-year return, and extrapolating one would be a lie. */
+  invPeriods(inv) {
+    var nav = this.state.invNav;
+    if (!inv || !inv.schemeCode || !nav || nav.code !== inv.schemeCode) return null;
+    var series = nav.series;
+    if (!series || !series.length) return { rows: [], error: nav.error || '', busy: !!nav.busy };
+
+    var last = series[series.length - 1];
+    var first = series[0];
+    var defs = [
+      { label: '1 month', months: 1 }, { label: '3 months', months: 3 },
+      { label: '6 months', months: 6 }, { label: '1 year', months: 12 },
+      { label: '3 years', months: 36 }, { label: '5 years', months: 60 }
+    ];
+    var at = function (iso) {
+      var hit = null;
+      for (var i = 0; i < series.length; i++) { if (series[i].date <= iso) hit = series[i]; else break; }
+      return hit;
+    };
+    var rows = defs.map(function (d) {
+      var want = mmAddM(last.date, -d.months);
+      /* Nothing published on or before that date means the series does not
+         reach back that far, so the period is simply not offered. A fund six
+         months old has no one-year return and will not be given one. */
+      var from = at(want);
+      if (!from || !(+from.nav > 0)) return null;
+      var pct = ((last.nav - from.nav) / from.nav) * 100;
+      var years = d.months / 12;
+      /* Under a year, annualising a short run overstates it, so only the
+         plain change is given. */
+      var cagr = years >= 1 ? (Math.pow(last.nav / from.nav, 1 / years) - 1) * 100 : null;
+      return {
+        label: d.label, from: from.date, fromNav: from.nav, toNav: last.nav,
+        pct: Math.round(pct * 100) / 100,
+        cagr: cagr === null ? null : Math.round(cagr * 100) / 100
+      };
+    }).filter(Boolean);
+
+    var sinceYears = mmDaysBetween(first.date, last.date) / 365.25;
+    if (+first.nav > 0 && sinceYears > 0.08) {
+      var sPct = ((last.nav - first.nav) / first.nav) * 100;
+      rows.push({
+        label: 'Since ' + mmDmy(first.date), from: first.date, fromNav: first.nav, toNav: last.nav,
+        pct: Math.round(sPct * 100) / 100,
+        cagr: sinceYears >= 1
+          ? Math.round((Math.pow(last.nav / first.nav, 1 / sinceYears) - 1) * 10000) / 100
+          : null
+      });
+    }
+    return { rows: rows, error: nav.error || '', busy: !!nav.busy, asOf: last.date, latest: last.nav };
+  }
+
+  invDetailVals() {
+    var self = this;
+    var inv = this.inv(this.state.invDetail);
+    var st = this.invState(inv);
+    var unitised = mmInvIsUnitised(inv.type);
+    var txns = this.invTxnsFor(inv.id).slice().sort(function (a, b) {
+      return a.date < b.date ? 1 : a.date > b.date ? -1 : 0;
+    });
+    var gainColour = st.gain > 0 ? 'var(--c-1a6b3c)' : st.gain < 0 ? 'var(--c-a3241f)' : 'var(--c-4a5b6b)';
+
+    var rows = txns.map(function (t, i) {
+      var inflow = mmInvIsInflow(t.type);
+      return {
+        key: t.id,
+        style: self.rowStyle(i, false),
+        click: null,
+        cells: [
+          self.tcell(mmDmy(t.date), '100px'),
+          self.tcell(MM_INV_TXN_LABEL[t.type] || t.type, '150px', 'left',
+            { color: inflow ? 'var(--c-14416e)' : 'var(--c-a3241f)' }),
+          self.tcell(mmInr(t.amount), '130px', 'right', { bold: true }),
+          self.tcell(+t.units > 0 ? (+t.units).toFixed(4) : '—', '110px', 'right'),
+          self.tcell(+t.nav > 0 ? mmInr(t.nav) : '—', '110px', 'right'),
+          self.tcell(self.acctName(t.accountId) || '—', '150px'),
+          self.tcell(t.sipId ? 'SIP' : (t.notes || ''), '160px', 'left', { color: 'var(--c-5b7186)' }),
+          self.tacts([{
+            label: 'Delete', danger: true, go: function (e) {
+              e.stopPropagation(); self.deleteInvTxn(inv, t);
+            }
+          }], '100px')
+        ]
+      };
+    });
+
+    var panels = [
+      this.panel({ label: 'Invested', value: mmInr(st.invested) }),
+      this.panel({ label: 'Worth today', value: mmInr(st.value), color: 'var(--c-14416e)' }),
+      this.panel({ label: 'Gain / loss', value: mmInr(st.gain), color: gainColour }),
+      this.panel({
+        label: 'Return', value: st.invested > 0 ? st.returnPct.toFixed(2) + '%' : '—',
+        color: gainColour, note: 'on what is still in'
+      }),
+      this.panel({
+        label: 'XIRR', value: st.xirr === null ? '—' : st.xirr.toFixed(2) + '%',
+        note: st.xirr === null ? 'needs dated flows and a value' : 'annualised, by actual dates'
+      })
+    ];
+    if (unitised) {
+      panels.push(this.panel({
+        label: 'Units', value: st.units > 0 ? st.units.toFixed(4) : '—',
+        note: st.avgPrice > 0 ? 'average cost ' + mmInr(st.avgPrice) : 'nothing held'
+      }));
+      panels.push(this.panel({
+        label: 'Latest price', value: +inv.currentNav > 0 ? mmInr(inv.currentNav) : '—',
+        note: inv.navDate ? 'as of ' + mmNiceDate(inv.navDate) : 'not dated'
+      }));
+    } else {
+      var daysLeft = inv.maturityDate ? mmDaysBetween(mmIso(new Date()), inv.maturityDate) : null;
+      panels.push(this.panel({
+        label: 'Maturity',
+        value: inv.maturityDate ? mmDmy(inv.maturityDate) : '—',
+        note: daysLeft === null ? 'no date set'
+          : (daysLeft < 0 ? 'already matured' : 'in ' + daysLeft + ' days')
+      }));
+      panels.push(this.panel({
+        label: 'Rate', value: +inv.rate > 0 ? (+inv.rate).toFixed(2) + '%' : '—', note: 'as entered'
+      }));
+    }
+
+    /* Published performance, where there is a scheme to look it up for. */
+    var per = this.invPeriods(inv);
+    var bars = [];
+    if (per && per.rows.length) {
+      var maxAbs = per.rows.reduce(function (m, r) { return Math.max(m, Math.abs(r.pct)); }, 0);
+      bars = per.rows.map(function (r) {
+        return {
+          name: r.label + '  ·  from ' + mmDmy(r.from) +
+            (r.cagr === null ? '' : '  ·  ' + r.cagr.toFixed(2) + '% a year'),
+          value: (r.pct >= 0 ? '+' : '') + r.pct.toFixed(2) + '%',
+          pct: maxAbs ? Math.round((Math.abs(r.pct) / maxAbs) * 100) + '%' : '0%',
+          barStyle: 'position:absolute;left:0;top:0;bottom:0;width:' +
+            (maxAbs ? Math.max(1, (Math.abs(r.pct) / maxAbs) * 100) : 0) + '%;background:' +
+            (r.pct < 0 ? 'linear-gradient(var(--c-e08b83),var(--c-c1544a))'
+              : 'linear-gradient(var(--c-5cb173),var(--c-3d8f52))'),
+          go: null
+        };
+      });
+    }
+
+    var sub = [inv.type, inv.institution, inv.folio ? 'folio ' + inv.folio : '',
+      inv.schemeCode ? 'scheme ' + inv.schemeCode : '', inv.isin ? 'ISIN ' + inv.isin : '']
+      .filter(Boolean).join('  ·  ');
+
+    var noteParts = ['This is the holding on its own. The figures are the same ones the portfolio uses.'];
+    if (inv.schemeCode) {
+      if (per && per.busy) noteParts.push('Fetching the published NAV history…');
+      else if (per && per.error) noteParts.push(per.error);
+      else if (per && per.rows.length) {
+        noteParts.push('The periods shown are the scheme\u2019s own published NAV, point to point — ' +
+          'what the fund did, not what you got. What you got is the return and XIRR above, which ' +
+          'depend on when you actually put money in.');
+      }
+    } else if (unitised) {
+      noteParts.push('No scheme is linked, so past periods cannot be looked up. Edit the holding and search for the fund to link one.');
+    }
+
+    return {
+      isTable: true,
+      tableTitle: inv.name || '(unnamed investment)',
+      tableSub: sub || 'no scheme linked',
+      tableTools: [
+        this.btn('All investments', function () { self.closeInvDetail(); }),
+        this.btn('Add money…', function () { self.openInvTxn(inv, 'buy'); }),
+        this.btn('Withdraw…', function () { self.openInvTxn(inv, 'withdrawal'); }),
+        this.btn('Edit', function () { self.openInvestment('edit', inv); }, 'primary')
+      ],
+      tableCols: [
+        this.tcol('Date', '100px'), this.tcol('What', '150px'),
+        this.tcol('Amount', '130px', 'right'), this.tcol('Units', '110px', 'right'),
+        this.tcol('Price', '110px', 'right'), this.tcol('Account', '150px'),
+        this.tcol('Note', '160px'), this.tcol('', '100px', 'right')
+      ],
+      tableRows: rows, tableEmpty: rows.length === 0,
+      emptyMsg: 'Nothing has been put into this holding yet.',
+      emptyBtn: 'Add money…', emptyGo: function () { self.openInvTxn(inv, 'buy'); },
+      hasPanels: true, hasBars: bars.length > 0, hasFoot: false,
+      panels: panels, bars: bars,
+      hasTableNote: true, tableNote: noteParts.join('  ')
+    };
+  }
+
+  deleteInvTxn(inv, t) {
+    var self = this;
+    this.setState({
+      confirm: {
+        msg: 'Remove this ' + (MM_INV_TXN_LABEL[t.type] || t.type).toLowerCase() + ' of ' +
+          mmInr(t.amount) + ' on ' + mmDmy(t.date) + '? The matching ledger entry is not removed — ' +
+          'delete that from the Ledger if it should go too.',
+        ok: function () {
+          self.pushUndo('removing a transaction from ' + inv.name, ['invTxns']);
+          self.mutate(function (db) {
+            db.invTxns = db.invTxns.filter(function (x) { return x.id !== t.id; });
+          });
+          self.setState({ confirm: null });
+          self.flashUndo('Removed.', 'removing a transaction from ' + inv.name);
+        }
+      }
+    });
+  }
+
   investVals(bal) {
     var self = this;
     if (this.state.invView === 'sips') return this.sipVals();
+    if (this.state.invDetail && this.inv(this.state.invDetail)) return this.invDetailVals();
     /* Savings goals kept their own screen until the tab became Investments.
        The data was never touched; this is where it now lives. */
     if (this.state.invView === 'goals') {
@@ -6289,7 +6534,7 @@ class Component extends DCLogic {
       var xirr = st.xirr === null ? '—' : st.xirr.toFixed(2) + '%';
       return {
         key: inv.id,
-        go: function () { self.openInvestment('edit', inv); },
+        go: function () { self.openInvDetail(inv); },
         style: self.rowStyle(0, false),
         cells: [
           self.tcell(inv.name || '(unnamed)', '200px', 'left', { bold: true }),
@@ -6301,6 +6546,7 @@ class Component extends DCLogic {
           self.tcell(xirr, '92px', 'right'),
           self.tcell(inv.status || 'active', '84px'),
           self.tacts([
+            { label: 'Open', go: function (e) { e.stopPropagation(); self.openInvDetail(inv); } },
             { label: 'Add money…', go: function (e) { e.stopPropagation(); self.openInvTxn(inv, 'buy'); } },
             { label: 'Withdraw…', go: function (e) { e.stopPropagation(); self.openInvTxn(inv, 'withdrawal'); } },
             { label: 'Edit', go: function (e) { e.stopPropagation(); self.openInvestment('edit', inv); } }
