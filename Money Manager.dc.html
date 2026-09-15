@@ -6651,17 +6651,22 @@ class Component extends DCLogic {
         title: 'Linked to scheme ' + inv.schemeCode + ', but no NAV has been fetched yet. Use Refresh prices.'
       };
     }
-    if (mmHasScheme(inv.type)) {
-      /* Fixable, and worth saying so: this kind does have a scheme to link. */
-      return {
-        linked: false, text: 'not linked', color: 'var(--c-a3241f)',
-        title: 'No scheme is linked, so this price never changes on its own. Edit the holding and search for it.'
-      };
-    }
+    var linkable = mmHasScheme(inv.type);
+    /* A price you entered yourself is a working price, so it is not called
+       "not linked" \u2014 that wording is kept for the case where there is no
+       price at all and one could be fetched. */
     if (+inv.currentNav > 0 || +inv.currentValue > 0) {
       return {
         linked: false, text: 'by hand', color: 'var(--c-5b7186)',
-        title: 'Valued at the price you entered. There is no daily NAV for this kind.'
+        title: linkable
+          ? 'Valued at the price you entered. This kind can be linked to a scheme \u2014 edit it and search \u2014 and then it keeps itself up to date.'
+          : 'Valued at the price you entered. There is no daily NAV for this kind.'
+      };
+    }
+    if (linkable) {
+      return {
+        linked: false, text: 'not linked', color: 'var(--c-a3241f)',
+        title: 'No scheme is linked and no price has been entered, so this sits at what it cost. Edit it and search for the scheme.'
       };
     }
     return {
@@ -6675,23 +6680,30 @@ class Component extends DCLogic {
   invPricedAsOf() {
     var self = this;
     return this.cache('invasof', function () {
-      var oldest = '', newest = '', linked = 0, manual = 0, unpriced = 0, unlinked = 0;
+      var oldest = '', newest = '', linked = 0, manual = 0, unpriced = 0, unlinked = 0, pending = 0;
       (self.state.db.investments || []).forEach(function (inv) {
         if (inv.status === 'closed' || inv.status === 'sold') return;
-        if (inv.schemeCode && inv.navDate) {
-          linked++;
-          if (!oldest || inv.navDate < oldest) oldest = inv.navDate;
-          if (inv.navDate > newest) newest = inv.navDate;
+        /* Anything carrying a scheme code IS linked. Whether a NAV has been
+           fetched for it yet is a separate question, and conflating the two
+           counts a linked holding as unlinked — sending its owner looking
+           for a problem that is not there. */
+        if (inv.schemeCode) {
+          if (inv.navDate) {
+            linked++;
+            if (!oldest || inv.navDate < oldest) oldest = inv.navDate;
+            if (inv.navDate > newest) newest = inv.navDate;
+          } else pending++;
           return;
         }
-        /* A kind that COULD be linked but is not is its own case: it is the
-           one the owner can fix, and the one that looks broken until they do. */
-        if (!inv.schemeCode && mmHasScheme(inv.type)) unlinked++;
+        /* No scheme at all. A price entered by hand is a working price; a
+           kind that could have been linked and has neither is the one that
+           looks broken until it is fixed. */
         if (+inv.currentNav > 0 || +inv.currentValue > 0) manual++;
+        else if (mmHasScheme(inv.type)) unlinked++;
         else unpriced++;
       });
       return {
-        oldest: oldest, newest: newest, linked: linked,
+        oldest: oldest, newest: newest, linked: linked, pending: pending,
         manual: manual, unpriced: unpriced, unlinked: unlinked
       };
     });
@@ -7172,6 +7184,9 @@ class Component extends DCLogic {
           : '') +
         (asOf.manual ? asOf.manual + ' holding(s) are valued at what you entered. ' : '') +
         (asOf.unpriced ? asOf.unpriced + ' have no price yet and are shown at cost. ' : '') +
+        (asOf.pending
+          ? asOf.pending + ' holding(s) are linked but have no NAV yet \u2014 use Refresh prices. '
+          : '') +
         (asOf.unlinked
           ? asOf.unlinked + ' holding(s) show “not linked”: no scheme is attached, so their value never ' +
             'changes on its own. Open one, choose Edit, and search for it to link it. '
@@ -11244,12 +11259,19 @@ class Component extends DCLogic {
         fields.push(this.fld('Interest rate %', 'text', a.rate, set('rate'), { type: 'number', hint: 'optional' }));
         fields.push(this.fld('Maturity date', 'text', a.maturityDate, set('maturityDate'),
           { type: 'date', hint: 'optional — drives the maturity tracker' }));
-      } else if (!isMf) {
+      } else if (!a.schemeCode) {
+        /* Unitised, with no scheme attached. The price has to come from you,
+           whether or not this kind COULD have been looked up \u2014 otherwise a
+           Gold ETF added without using Search has no way to be priced at all
+           and sits at cost for ever. When a scheme is linked the dated NAV
+           above supplies this instead, and the field gives way to it. */
         fields.push(this.fld('Current price', 'text', a.currentNav, set('currentNav'), {
           type: 'number',
-          hint: mmInvGroupOf(a.type) === 'market'
-            ? 'per share \u2014 there is no daily NAV for a listed holding, so this is the price you keep'
-            : 'per unit, gram or share'
+          hint: isMf
+            ? 'per unit \u2014 or search above to link the scheme, and it keeps itself up to date'
+            : (mmInvGroupOf(a.type) === 'market'
+              ? 'per share \u2014 there is no daily NAV for a listed holding, so this is the price you keep'
+              : 'per unit, gram or share')
         }));
       }
 

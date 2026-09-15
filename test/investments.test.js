@@ -1962,15 +1962,19 @@ function withFundSearch(c, result) {
     });
     const asOf = c.invPricedAsOf();
     ok('the hand-priced one is counted', asOf.manual === 1, String(asOf.manual));
-    ok('the unpriced one too', asOf.unpriced === 1, String(asOf.unpriced));
-    ok('and neither is counted as linked', asOf.linked === 0, String(asOf.linked));
+    /* The second has no price AND no scheme, but its kind could be linked —
+       so it is the fixable case, not merely an unpriced one. */
+    ok('the one that could be linked is counted as unlinked', asOf.unlinked === 1,
+      String(asOf.unlinked));
+    ok('and not as simply unpriced', asOf.unpriced === 0, String(asOf.unpriced));
+    ok('neither is counted as linked', asOf.linked === 0, String(asOf.linked));
 
     c.state.tab = 'Investments';
     const v = c.investVals(c.balances());
     ok('the note says how many you priced yourself',
       /1 holding\(s\) are valued at what you entered/.test(v.tableNote), v.tableNote);
-    ok('and how many have no price at all',
-      /1 have no price yet and are shown at cost/.test(v.tableNote), v.tableNote);
+    ok('and how many can be linked but are not',
+      /1 holding\(s\) show/.test(v.tableNote), v.tableNote);
     ok('the panels say prices came from you, not a NAV',
       /prices you entered/.test(v.panels[1].note), v.panels[1].note);
   }
@@ -2140,7 +2144,7 @@ function withFundSearch(c, result) {
     const p = c.invPriceSource(inv);
     ok('the holding is reported as not linked', p.text === 'not linked', p.text);
     ok('in a colour that says it needs attention', /a3241f/.test(p.color), p.color);
-    ok('and the tooltip says how to fix it', /search for it/i.test(p.title), p.title);
+    ok('and the tooltip says how to fix it', /search for the scheme/i.test(p.title), p.title);
 
     c.state.tab = 'Investments';
     const v = c.investVals(c.balances());
@@ -2265,6 +2269,101 @@ function withFundSearch(c, result) {
     const v2 = c.investVals(c.balances());
     ok('a real loss is still negative', /^-\d/.test(v2.tableRows[0].cells[retCol].text),
       v2.tableRows[0].cells[retCol].text);
+  }
+
+  console.log('\nEvery unitised kind can be given a price by hand');
+  {
+    /* Widening the scheme search to ETFs took the manual price field away
+       from them, because the field was shown only to kinds that had no
+       search. A Gold ETF added without using Search then had no way to be
+       priced at all and sat at cost for ever. Search and a manual price are
+       alternatives, not opposites. */
+    const kinds = ['Gold ETF', 'ETF', 'Lump Sum', 'Physical Gold',
+      'Sovereign Gold Bond', 'Stocks', 'Digital Gold', 'REIT'];
+    kinds.forEach((kind) => {
+      const c = book();
+      c.openInvestment('add', {});
+      c.dlgSet({ type: kind });
+      const labels = (c.dlgVals().dlgFields || []).map((f) => f.label).filter(Boolean);
+      ok('a "' + kind + '" holding can be priced by hand',
+        labels.indexOf('Current price') >= 0, JSON.stringify(labels));
+    });
+
+    /* Once a scheme IS attached the NAV supplies the price, so the manual
+       field steps aside rather than competing with it. */
+    const c = withFundSearch(book());
+    c.openInvestment('add', {});
+    c.dlgSet({ type: 'Gold ETF' });
+    ok('before linking, the price field is there',
+      (c.dlgVals().dlgFields || []).some((f) => f.label === 'Current price'));
+    c.invPickFund(PPFAS);
+    const after = (c.dlgVals().dlgFields || []).map((f) => f.label);
+    ok('after linking, the NAV replaces it', after.indexOf('Current price') < 0,
+      JSON.stringify(after));
+    ok('and the dated NAV is shown instead', after.indexOf('Latest NAV') >= 0,
+      JSON.stringify(after));
+  }
+
+  console.log('\nA Gold ETF priced by hand actually tracks');
+  {
+    const c = book();
+    c.openInvestment('add', {});
+    c.dlgSet({
+      name: 'Nippon India Gold ETF', type: 'Gold ETF', currentNav: 78,
+      buyDate: '2026-01-15', buyAmount: 50000, buyNav: 70
+    });
+    c.saveInvestment();
+    const inv = c.state.db.investments[0];
+    ok('the price was kept', +inv.currentNav === 78, String(inv.currentNav));
+
+    const st = c.invState(inv);
+    ok('units came from the price paid', Math.abs(st.units - 714.2857) < 0.01, String(st.units));
+    ok('the value follows the current price', Math.abs(st.value - 55714.29) < 1, String(st.value));
+    ok('so there is a gain to see', st.gain > 5700 && st.gain < 5800, String(st.gain));
+    ok('and a return', st.returnPct > 11 && st.returnPct < 12, String(st.returnPct));
+    ok('and an XIRR', st.xirr !== null, String(st.xirr));
+
+    ok('it is described as priced by hand', c.invPriceSource(inv).text === 'by hand',
+      c.invPriceSource(inv).text);
+    ok('and told it could be linked instead',
+      /can be linked to a scheme/.test(c.invPriceSource(inv).title), c.invPriceSource(inv).title);
+
+    c.state.tab = 'Investments';
+    const v = c.investVals(c.balances());
+    const priced = v.tableCols.findIndex((x) => x.label === 'Priced');
+    ok('the row says "by hand", not "not linked"',
+      v.tableRows[0].cells[priced].text === 'by hand', v.tableRows[0].cells[priced].text);
+    ok('the status still shows', v.tableRows[0].cells[priced + 1].text === 'active',
+      v.tableRows[0].cells[priced + 1].text);
+    ok('and it is counted as priced, not as a problem',
+      c.invPricedAsOf().manual === 1 && c.invPricedAsOf().unlinked === 0,
+      JSON.stringify(c.invPricedAsOf()));
+  }
+
+  console.log('\nLinked but not yet fetched is not the same as unlinked');
+  {
+    const c = book();
+    c.mutate((db) => {
+      db.investments = [{
+        id: 'p1', name: 'Just linked', type: 'Gold ETF', accountId: 'mf',
+        schemeCode: '153357', currentNav: 0, navDate: '', status: 'active',
+        createdAt: 1, updatedAt: 1
+      }];
+    });
+    const asOf = c.invPricedAsOf();
+    ok('it is not counted as unlinked, because it IS linked', asOf.unlinked === 0,
+      String(asOf.unlinked));
+    ok('it is counted as awaiting a price', asOf.pending === 1, String(asOf.pending));
+    ok('and not as priced by hand', asOf.manual === 0, String(asOf.manual));
+    ok('the row says a NAV has not arrived yet',
+      c.invPriceSource(c.inv('p1')).text === 'no NAV yet', c.invPriceSource(c.inv('p1')).text);
+
+    c.state.tab = 'Investments';
+    const v = c.investVals(c.balances());
+    ok('the note tells you to refresh rather than to link',
+      /linked but have no NAV yet/.test(v.tableNote), v.tableNote);
+    ok('and does not tell you to link something already linked',
+      !/show .not linked/.test(v.tableNote), v.tableNote);
   }
 
   console.log('\n' + (fails ? fails + ' FAILURE(S)' : 'all checks passed'));
