@@ -5028,6 +5028,18 @@ class Component extends DCLogic {
       };
     };
 
+    /* The portfolio, from the one place that computes it. What the accounts
+       carry is what the holdings cost; what the portfolio is worth is what
+       they would fetch today. Both are shown, because they are different
+       numbers and pretending otherwise is how a dashboard starts lying. */
+    var pf = this.portfolio();
+    var invSum = this.invMonthAndMaturity();
+    var pfColour = pf.totals.gain > 0 ? 'var(--c-1a6b3c)'
+      : pf.totals.gain < 0 ? 'var(--c-a3241f)' : 'var(--c-14416e)';
+    var goInvest = function (view) {
+      return function () { self.setState({ tab: 'Investments', invView: view || 'holdings' }); };
+    };
+
     var up = this.upcoming(30);
     var overdue = up.filter(function (u) { return u.date < mmIso(new Date()); });
     var recent = db.txns.slice().sort(function (a, b) {
@@ -5046,7 +5058,23 @@ class Component extends DCLogic {
       dashBlocks: [
         block('Net worth', mmInr(nw.net), 'assets − liabilities', nw.net < 0 ? 'var(--c-a3241f)' : 'var(--c-14416e)', function () { self.setState({ tab: 'Reports', report: 'net' }); }),
         block('Cash & bank', mmInr(liquid), 'spendable now', 'var(--c-1a6b3c)', function () { self.setState({ tab: 'Accounts' }); }),
-        block('Investments & assets', mmInr(invest), 'FD, gold, property…', 'var(--c-14416e)', function () { self.setState({ tab: 'Accounts' }); }),
+        block('Investments & assets', mmInr(invest), 'what they cost, by account', 'var(--c-14416e)', function () { self.setState({ tab: 'Accounts' }); }),
+        block('Portfolio value',
+          pf.rows.length ? mmInr(pf.totals.value) : '—',
+          pf.rows.length
+            ? (pf.totals.gain >= 0 ? '+' : '') + mmInr(pf.totals.gain) +
+              (pf.totals.invested > 0 ? '  ·  ' + pf.totals.returnPct.toFixed(1) + '%' : '')
+            : 'nothing invested yet',
+          pfColour, goInvest('holdings')),
+        block('SIPs due',
+          invSum.dueSips ? mmInr(invSum.dueAmount) : (invSum.activeSips ? mmInr(0) : '—'),
+          invSum.activeSips
+            ? (invSum.dueInstalments
+              ? invSum.dueInstalments + ' instalment' + (invSum.dueInstalments === 1 ? '' : 's') +
+                ' waiting, across ' + invSum.dueSips + ' SIP' + (invSum.dueSips === 1 ? '' : 's')
+              : mmInr(invSum.monthlySip) + '/mo committed')
+            : 'no SIPs set up',
+          invSum.dueSips ? 'var(--c-b3701c)' : 'var(--c-14416e)', goInvest('sips')),
         block('Card outstanding', mmInr(cards), 'owed on credit cards', cards ? 'var(--c-a3241f)' : 'var(--c-14416e)', function () { self.setState({ tab: 'Cards' }); }),
         block('Loan outstanding', mmInr(loans), 'principal still owed', loans ? 'var(--c-a3241f)' : 'var(--c-14416e)', function () { self.setState({ tab: 'Loans' }); }),
         block('Income', mmInr(inc), 'this period', 'var(--c-1a6b3c)', goLedger({}, 'income')),
@@ -5080,7 +5108,22 @@ class Component extends DCLogic {
             go: goLedger({ cat: c.id, sub: '' }, 'expense'), aw: '44px', color: 'var(--c-a3241f)',
             tint: 'linear-gradient(90deg,var(--c-fdf2f2) ' + pct + '%,transparent ' + pct + '%)'
           });
-        }), 'No spending in this period.')
+        }), 'No spending in this period.'),
+        this.dashList('Portfolio', pf.rows.slice().sort(function (a, b) {
+          return b.st.value - a.st.value;
+        }).slice(0, 9).map(function (r) {
+          /* The percentage shown is the return, and a return that cannot
+             honestly be computed shows as a dash rather than as 0%. */
+          var pct = r.st.invested > 0 ? r.st.returnPct : null;
+          return self.dashRow(
+            pct === null ? '—' : (pct >= 0 ? '+' : '') + pct.toFixed(1) + '%',
+            r.inv.name + ' · ' + (r.inv.type || ''),
+            mmInr(r.st.value), {
+              go: function () { self.setState({ tab: 'Investments', invView: 'holdings' }); },
+              aw: '76px',
+              color: r.st.gain > 0 ? 'var(--c-1a6b3c)' : r.st.gain < 0 ? 'var(--c-a3241f)' : 'var(--c-14416e)'
+            });
+        }), 'Nothing invested yet. Add a holding on the Investments tab.')
       ]
     };
   }
@@ -6175,7 +6218,7 @@ class Component extends DCLogic {
         var a = Math.abs(+t.amount || 0);
         if (isFinite(a)) thisMonth += a;
       });
-      var monthlySip = 0, activeSips = 0, dueSips = 0, dueAmount = 0;
+      var monthlySip = 0, activeSips = 0, dueSips = 0, dueInstalments = 0, dueAmount = 0;
       (self.state.db.sips || []).forEach(function (s) {
         if (s.status !== 'active') return;
         var a = Math.abs(+s.amount || 0);
@@ -6186,6 +6229,7 @@ class Component extends DCLogic {
         var pending = self.sipPending(s, today);
         if (pending.length) {
           dueSips++;
+          dueInstalments += pending.length;
           pending.forEach(function (dt) { dueAmount += self.sipAmountOn(s, dt); });
         }
       });
@@ -6198,7 +6242,8 @@ class Component extends DCLogic {
       });
       return {
         thisMonth: thisMonth, monthlySip: Math.round(monthlySip), activeSips: activeSips,
-        dueSips: dueSips, dueAmount: Math.round(dueAmount), nextMaturity: next
+        dueSips: dueSips, dueInstalments: dueInstalments,
+        dueAmount: Math.round(dueAmount), nextMaturity: next
       };
     });
   }
@@ -6212,13 +6257,26 @@ class Component extends DCLogic {
       this.btn('Holdings', function () { self.setState({ invView: 'holdings' }); },
         view === 'holdings' ? 'active' : null),
       this.btn('SIPs', function () { self.setState({ invView: 'sips' }); },
-        view === 'sips' ? 'active' : null)
+        view === 'sips' ? 'active' : null),
+      this.btn('Goals', function () { self.setState({ invView: 'goals' }); },
+        view === 'goals' ? 'active' : null)
     ];
   }
 
-  investVals() {
+  investVals(bal) {
     var self = this;
     if (this.state.invView === 'sips') return this.sipVals();
+    /* Savings goals kept their own screen until the tab became Investments.
+       The data was never touched; this is where it now lives. */
+    if (this.state.invView === 'goals') {
+      var g = this.goalVals(bal);
+      g.tableTools = this.invViewTools('goals').concat(g.tableTools);
+      g.hasPanels = true;
+      g.hasTableNote = true;
+      g.tableNote = 'A goal is a target you are saving towards, tracked by hand. ' +
+        'It is separate from a holding, which is money already invested and valued at what it is worth today.';
+      return g;
+    }
     var p = this.portfolio();
     var extra = this.invMonthAndMaturity();
     var t = p.totals;

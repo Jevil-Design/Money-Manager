@@ -931,6 +931,107 @@ function withFundSearch(c, result) {
     ok('for the right total', sum.dueAmount === 8000, String(sum.dueAmount));
   }
 
+  console.log('\nGoals are visible again, inside Investments');
+  {
+    const c = withFundSearch(book());
+    c.mutate((db) => {
+      db.goals = [
+        { id: 'g1', name: 'Emergency fund', target: 300000, saved: 90000, by: '2027-03-31', accountId: 'bank' },
+        { id: 'g2', name: 'New laptop', target: 120000, saved: 120000, by: '', accountId: 'bank' }
+      ];
+    });
+    c.state.tab = 'Investments';
+    c.setState({ invView: 'goals' });
+
+    const v = c.investVals(c.balances());
+    ok('the goals view is reachable', v.tableTitle === 'Savings goals', v.tableTitle);
+    ok('both goals are listed', v.tableRows.length === 2, String(v.tableRows.length));
+    ok('the first is the one we saved', /Emergency fund/.test(v.tableRows[0].cells[0].text),
+      v.tableRows[0].cells[0].text);
+    ok('the view switcher is still there', v.tableTools.length >= 4, String(v.tableTools.length));
+    ok('and it offers to add a goal',
+      JSON.stringify(v.tableTools).indexOf('Add goal') >= 0);
+    ok('the panels total what is targeted', v.panels[0].value === mmInrOf(420000),
+      v.panels[0].value);
+    ok('and what is saved', v.panels[1].value === mmInrOf(210000), v.panels[1].value);
+    ok('no cell shows NaN or undefined',
+      v.tableRows.every((r) => r.cells.every((cell) => !/NaN|undefined|Infinity/.test(String(cell.text || '')))),
+      JSON.stringify(v.tableRows[0].cells.map((x) => x.text)));
+    ok('it says how a goal differs from a holding',
+      v.hasTableNote && /separate from a holding/.test(v.tableNote), v.tableNote);
+
+    /* The switcher goes all three ways. */
+    v.tableTools[0].go();
+    ok('back to holdings', c.investVals(c.balances()).tableTitle === 'Investments');
+    v.tableTools[1].go();
+    ok('across to SIPs', c.investVals(c.balances()).tableTitle === 'SIPs');
+    v.tableTools[2].go();
+    ok('and back to goals', c.investVals(c.balances()).tableTitle === 'Savings goals');
+  }
+
+  console.log('\nThe dashboard shows the portfolio without contradicting it');
+  {
+    const c = withFundSearch(book());
+    const dash = () => c.dashVals(c.balances(), c.baseList(), c.summary());
+
+    let d = dash();
+    const find = (label) => d.dashBlocks.filter((b) => b.label === label)[0];
+    ok('there is a portfolio block', !!find('Portfolio value'));
+    ok('with nothing invested it shows a dash, not zero',
+      find('Portfolio value').value === '—', find('Portfolio value').value);
+    ok('and says so', /nothing invested/i.test(find('Portfolio value').note),
+      find('Portfolio value').note);
+    ok('the SIP block says there are none',
+      find('SIPs due').value === '—' && /no sips/i.test(find('SIPs due').note),
+      find('SIPs due').note);
+    ok('no dashboard block shows NaN or undefined',
+      d.dashBlocks.every((b) => !/NaN|undefined|Infinity/.test(String(b.value) + String(b.note))),
+      JSON.stringify(d.dashBlocks.map((b) => b.value)));
+
+    /* Buy something, then move the price. */
+    c.openInvestment('add', {});
+    c.invPickFund(PPFAS);
+    c.dlgSet({ buyDate: '2026-03-15', buyAmount: 50000 });
+    c.saveInvestment();
+    c.mutate((db) => { db.investments[0].currentNav = 98.5; });
+
+    d = dash();
+    const pv = find('Portfolio value');
+    const pf = c.portfolio();
+    ok('the block equals the portfolio, to the rupee',
+      pv.value === mmInrOf(pf.totals.value), pv.value + ' vs ' + mmInrOf(pf.totals.value));
+    ok('the gain is shown with its sign', /^\+/.test(pv.note), pv.note);
+    ok('and the return alongside it', /%/.test(pv.note), pv.note);
+    ok('the account block still shows what it cost, which is a different number',
+      find('Investments & assets').value === mmInrOf(50000),
+      find('Investments & assets').value);
+    ok('and says which of the two it is', /what they cost/i.test(find('Investments & assets').note),
+      find('Investments & assets').note);
+    ok('net worth already includes the gain',
+      Math.abs(c.netWorth() - (450000 + pf.totals.value)) < 1, String(c.netWorth()));
+
+    const list = d.dashLists.filter((l) => l.title === 'Portfolio')[0];
+    ok('the portfolio list is on the dashboard', !!list);
+    ok('with the holding in it', list.rows.length === 1, String(list.rows.length));
+    ok('showing its return, signed', /^\+/.test(list.rows[0].a), list.rows[0].a);
+    ok('and its value', list.rows[0].c === mmInrOf(pf.totals.value), list.rows[0].c);
+
+    /* A SIP that is owed shows as owed. */
+    c.openSip('add');
+    c.dlgSet({
+      investmentId: c.state.db.investments[0].id, amount: 5000,
+      freq: 'monthly', start: '2026-08-15', accountId: 'bank'
+    });
+    c.saveSip();
+    d = dash();
+    ok('the SIP block counts what is waiting',
+      find('SIPs due').value === mmInrOf(10000), find('SIPs due').value);
+    ok('and how many instalments, not just how many SIPs',
+      /2 instalments waiting, across 1 SIP/.test(find('SIPs due').note), find('SIPs due').note);
+    ok('it is coloured as a prompt, not as an error',
+      find('SIPs due').valStyle.indexOf('b3701c') >= 0, find('SIPs due').valStyle);
+  }
+
   console.log('\n' + (fails ? fails + ' FAILURE(S)' : 'all checks passed'));
   process.exit(fails ? 1 : 0);
 })().catch((e) => { console.error(e); process.exit(1); });
