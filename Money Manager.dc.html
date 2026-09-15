@@ -2959,7 +2959,7 @@ class Component extends DCLogic {
     return db;
   }
 
-  componentDidUpdate() { this.measure(); }
+  componentDidUpdate() { this.measure(); this.maybeRefreshNavs(); }
   componentWillUnmount() {
     var self = this;
     window.removeEventListener('keydown', this.onKey);
@@ -6443,39 +6443,150 @@ class Component extends DCLogic {
     this.flashUndo('Removed from the watchlist.', 'removing a scheme from the watchlist');
   }
 
-  /* Fetch today's NAV for everything being watched. One request per scheme,
-     and a scheme that fails keeps the NAV it already had rather than being
-     blanked or guessed at. */
+  /* ---- prices -----------------------------------------------------------
+     The latest published NAV for a set of scheme codes. One request each. A
+     code that fails, or comes back without a usable price, is simply absent
+     from the result — never reported as zero, which would read as a crash to
+     nothing. Shared by the watchlist and the portfolio so the two cannot
+     drift apart in how they treat a failure.
+     ---------------------------------------------------------------------- */
+  fetchNavs(codes) {
+    var self = this;
+    var uniq = [];
+    (codes || []).forEach(function (c) {
+      c = String(c || '').trim();
+      if (c && uniq.indexOf(c) < 0) uniq.push(c);
+    });
+    if (!uniq.length) return Promise.resolve({ by: {}, asked: 0, got: 0 });
+    return Promise.all(uniq.map(function (code) {
+      return self.api('/api/v1/funds/' + encodeURIComponent(code))
+        .then(function (r) {
+          var f = (r && (r.fund || r)) || {};
+          return +f.nav > 0 ? { code: code, nav: +f.nav, navDate: f.navDate || '' } : null;
+        })
+        .catch(function () { return null; });
+    })).then(function (list) {
+      var by = {};
+      list.filter(Boolean).forEach(function (x) { by[x.code] = x; });
+      return { by: by, asked: uniq.length, got: Object.keys(by).length };
+    });
+  }
+
+  /* Fetch today's NAV for everything being watched. A scheme that fails keeps
+     the NAV it already had rather than being blanked or guessed at. */
   refreshWatch() {
     var self = this;
     var list = (this.state.db.watchlist || []).slice();
     if (!list.length) { this.flash('There is nothing on the watchlist.'); return Promise.resolve(); }
     this.setState({ watchBusy: true });
-    return Promise.all(list.map(function (w) {
-      return self.api('/api/v1/funds/' + encodeURIComponent(w.schemeCode))
-        .then(function (r) {
-          var f = (r && (r.fund || r)) || {};
-          return +f.nav > 0 ? { id: w.id, nav: f.nav, navDate: f.navDate || '' } : null;
-        })
-        .catch(function () { return null; });
-    })).then(function (results) {
-      var got = results.filter(Boolean);
+    return this.fetchNavs(list.map(function (w) { return w.schemeCode; })).then(function (res) {
       self.setState({ watchBusy: false });
-      if (!got.length) {
+      if (!res.got) {
         self.flash('No prices could be fetched just now. Nothing has been changed.');
         return;
       }
       self.mutate(function (db) {
-        got.forEach(function (g) {
-          db.watchlist.forEach(function (w) {
-            if (w.id !== g.id) return;
-            w.nav = g.nav; w.navDate = g.navDate; w.updatedAt = Date.now();
-          });
+        db.watchlist.forEach(function (w) {
+          var g = res.by[w.schemeCode];
+          if (!g) return;
+          w.nav = g.nav; w.navDate = g.navDate; w.updatedAt = Date.now();
         });
-      }, got.length === list.length
-        ? 'Prices updated for all ' + got.length + ' scheme(s).'
-        : 'Prices updated for ' + got.length + ' of ' + list.length +
+      }, res.got === res.asked
+        ? 'Prices updated for all ' + res.got + ' scheme(s).'
+        : 'Prices updated for ' + res.got + ' of ' + res.asked +
           ' — the rest kept the price they had.');
+    });
+  }
+
+  /* The same, for holdings. This is what makes gain, return and XIRR stand at
+     today's date rather than at whatever the price happened to be when the
+     holding was first entered. */
+  refreshInvestmentNavs(quiet) {
+    var self = this;
+    var linked = (this.state.db.investments || []).filter(function (inv) {
+      return inv.schemeCode && inv.status !== 'closed' && inv.status !== 'sold';
+    });
+    if (!linked.length) {
+      if (!quiet) this.flash('No holding is linked to a scheme, so there is no price to fetch.');
+      return Promise.resolve();
+    }
+    this.setState({ navBusy: true });
+    return this.fetchNavs(linked.map(function (i) { return i.schemeCode; })).then(function (res) {
+      self.setState({ navBusy: false });
+      if (!res.got) {
+        if (!quiet) self.flash('No prices could be fetched just now. Nothing has been changed.');
+        return;
+      }
+      /* Only write when a price has actually moved. An unchanged NAV must not
+         bump the revision, because that would queue a pointless save and make
+         every device think the book had changed. */
+      var moved = linked.filter(function (inv) {
+        var g = res.by[inv.schemeCode];
+        return g && (g.nav !== +inv.currentNav || g.navDate !== (inv.navDate || ''));
+      });
+      if (!moved.length) {
+        if (!quiet) self.flash('Every price is already up to date.');
+        return;
+      }
+      var newest = moved.reduce(function (m, inv) {
+        var d = res.by[inv.schemeCode].navDate;
+        return d > m ? d : m;
+      }, '');
+      /* Only the holdings that were selected. A sold or closed position keeps
+         the price it was worth when it closed: that is a record of what
+         happened, and writing today's NAV over it would rewrite history. */
+      var wanted = {};
+      linked.forEach(function (inv) { wanted[inv.id] = true; });
+      self.mutate(function (db) {
+        db.investments.forEach(function (inv) {
+          if (!wanted[inv.id]) return;
+          var g = res.by[inv.schemeCode];
+          if (!g) return;
+          inv.currentNav = g.nav;
+          inv.navDate = g.navDate;
+          inv.updatedAt = Date.now();
+        });
+      }, moved.length + ' price' + (moved.length === 1 ? '' : 's') + ' updated' +
+        (newest ? ' to ' + mmNiceDate(newest) : '') +
+        '. Gain, return and XIRR now stand at that valuation.');
+    });
+  }
+
+  /* Prices go stale on their own, so they are refreshed on their own: once a
+     session, the first time the Investments tab is opened, and only when
+     something is actually out of date. Quiet, because an automatic refresh
+     that announces itself every time is noise. */
+  maybeRefreshNavs() {
+    if (this.navAuto) return;
+    var s = this.state;
+    if (!s.auth || s.auth.phase !== 'ready' || s.locked) return;
+    if (s.tab !== 'Investments') return;
+    var today = mmIso(new Date());
+    var stale = (s.db.investments || []).filter(function (inv) {
+      if (!inv.schemeCode || inv.status === 'closed' || inv.status === 'sold') return false;
+      return !inv.navDate || inv.navDate < today;
+    });
+    this.navAuto = true;                       /* once, whether or not it runs */
+    if (!stale.length) return;
+    this.refreshInvestmentNavs(true);
+  }
+
+  /* How current the portfolio's prices actually are. Reported rather than
+     assumed: the oldest price is the one that limits the whole figure. */
+  invPricedAsOf() {
+    var self = this;
+    return this.cache('invasof', function () {
+      var oldest = '', newest = '', linked = 0, manual = 0, unpriced = 0;
+      (self.state.db.investments || []).forEach(function (inv) {
+        if (inv.status === 'closed' || inv.status === 'sold') return;
+        if (inv.schemeCode && inv.navDate) {
+          linked++;
+          if (!oldest || inv.navDate < oldest) oldest = inv.navDate;
+          if (inv.navDate > newest) newest = inv.navDate;
+        } else if (+inv.currentNav > 0 || +inv.currentValue > 0) manual++;
+        else unpriced++;
+      });
+      return { oldest: oldest, newest: newest, linked: linked, manual: manual, unpriced: unpriced };
     });
   }
 
@@ -6867,20 +6978,37 @@ class Component extends DCLogic {
       };
     });
 
+    /* Every figure below is worked out as at a date, and that date is said
+       out loud rather than left to be assumed. Prices are the published NAV,
+       which is a working-day figure; the XIRR's closing flow is dated today,
+       so the two are labelled separately instead of being blurred together. */
+    var asOf = this.invPricedAsOf();
+    var today = mmIso(new Date());
+    var priceNote = asOf.linked
+      ? (asOf.oldest === asOf.newest
+        ? 'at NAV of ' + mmNiceDate(asOf.newest)
+        : 'at NAV of ' + mmNiceDate(asOf.oldest) + ' to ' + mmNiceDate(asOf.newest))
+      : (asOf.manual ? 'at prices you entered' : 'nothing priced yet');
+    var priceStale = asOf.oldest && mmDaysBetween(asOf.oldest, today) > 7;
+
     var gainColour = t.gain > 0 ? 'var(--c-1a6b3c)' : t.gain < 0 ? 'var(--c-a3241f)' : 'var(--c-14416e)';
     var panels = [
       this.panel({ label: 'Total invested', value: mmInr(t.invested) }),
-      this.panel({ label: 'Current value', value: mmInr(t.value), color: 'var(--c-14416e)' }),
-      this.panel({ label: 'Gain / loss', value: mmInr(t.gain), color: gainColour }),
+      this.panel({
+        label: 'Current value', value: mmInr(t.value), color: 'var(--c-14416e)',
+        note: priceNote
+      }),
+      this.panel({ label: 'Gain / loss', value: mmInr(t.gain), color: gainColour, note: priceNote }),
       this.panel({
         label: 'Overall return',
         value: t.invested > 0 ? t.returnPct.toFixed(2) + '%' : '—',
-        color: gainColour
+        color: gainColour, note: priceNote
       }),
       this.panel({
         label: 'XIRR',
         value: t.xirr === null ? '—' : t.xirr.toFixed(2) + '%',
-        note: t.xirr === null ? 'needs dated buys and a value' : 'annualised, by actual dates'
+        note: t.xirr === null ? 'needs dated buys and a value'
+          : 'annualised to ' + mmNiceDate(today)
       }),
       this.panel({
         label: 'Monthly SIP', value: mmInr(extra.monthlySip),
@@ -6904,6 +7032,9 @@ class Component extends DCLogic {
           ' · buying moves money between your own accounts, so it is never counted as spending'
         : 'no investments yet',
       tableTools: this.invViewTools('holdings').concat([
+        this.btn(this.state.navBusy ? 'Fetching…' : 'Refresh prices',
+          function () { self.refreshInvestmentNavs(); },
+          (this.state.navBusy || priceStale) ? 'active' : null),
         this.btn('+ Add investment', function () { self.openInvestment('add', {}); }, 'primary')
       ]),
       tableCols: [
@@ -6920,8 +7051,17 @@ class Component extends DCLogic {
       hasPanels: true, hasBars: false, hasFoot: false,
       panels: panels,
       hasTableNote: true,
-      tableNote: 'Values come from the latest NAV where a fund is linked, and from what you enter otherwise. ' +
-        'NAV is published once a working day, so it is dated rather than live.'
+      tableNote: 'Gain, return and XIRR are worked out from the prices above and today’s date, and are ' +
+        'brought up to date on their own the first time you open this tab each day. ' +
+        (asOf.linked
+          ? 'Linked funds are valued at the NAV published ' +
+            (asOf.oldest === asOf.newest ? 'on ' + mmNiceDate(asOf.newest)
+              : 'between ' + mmNiceDate(asOf.oldest) + ' and ' + mmNiceDate(asOf.newest)) +
+            ' — NAV is a once-a-working-day figure, not a live price. '
+          : '') +
+        (asOf.manual ? asOf.manual + ' holding(s) are valued at what you entered. ' : '') +
+        (asOf.unpriced ? asOf.unpriced + ' have no price yet and are shown at cost. ' : '') +
+        (priceStale ? 'The oldest price here is more than a week old — Refresh prices to bring it forward.' : '')
     };
   }
 

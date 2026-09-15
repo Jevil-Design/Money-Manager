@@ -39,9 +39,11 @@ class StubLogic {
   forceUpdate() {}
 }
 const { Component, MM_TABS, MM_TAB_ALIAS, mmInvGroupOf, mmInvIsUnitised, mmInvIsInflow,
-  mmInr: mmInrOf, mmIso } =
+  mmInr: mmInrOf, mmIso: mmIsoOf,
+  mmInvestmentFlows: mmFlows, mmXirr: mmXirrOf } =
   new Function('DCLogic', 'StreamableLogic', 'React',
-    src + '\n;return { Component, MM_TABS, MM_TAB_ALIAS, mmInvGroupOf, mmInvIsUnitised, mmInvIsInflow, mmInr, mmIso };')(
+    src + '\n;return { Component, MM_TABS, MM_TAB_ALIAS, mmInvGroupOf, mmInvIsUnitised,' +
+    ' mmInvIsInflow, mmInr, mmIso, mmInvestmentFlows, mmXirr };')(
     StubLogic, StubLogic, {});
 
 /* A book with a bank account and an investment account to hold a fund. */
@@ -1726,6 +1728,270 @@ function withFundSearch(c, result) {
     ok('with its NAV dated', JSON.stringify(picked.dlgFields).indexOf('as of') >= 0);
     ok('and the dialog says watching buys nothing',
       /buys nothing/.test(picked.dlgNote || JSON.stringify(picked)), picked.dlgNote);
+  }
+
+  /* ------------------------------------------- prices, and the date they are as at */
+
+  /* A book holding one linked fund, bought long enough ago that a year's
+     worth of XIRR is unambiguous. `now` is what the server will answer with. */
+  function pricedBook(now) {
+    const c = withFundSearch(book());
+    c.openInvestment('add', {});
+    c.invPickFund(PPFAS);                         /* NAV 89.5712 on 2026-09-11 */
+    c.dlgSet({ buyDate: '2025-09-15', buyAmount: 89571.2 });   /* 1000 units */
+    c.saveInvestment();
+    c.api = function (url) {
+      const m = url.match(/\/funds\/(\d+)$/);
+      if (m) {
+        if (now === 'fail') return Promise.reject(new Error('down'));
+        if (now === 'zero') return Promise.resolve({ fund: { schemeCode: m[1], nav: 0, navDate: '' } });
+        return Promise.resolve({ fund: Object.assign({ schemeCode: m[1] }, now) });
+      }
+      return Promise.resolve({});
+    };
+    return { c, inv: c.state.db.investments[0] };
+  }
+
+  console.log('\nA holding priced when it was added shows no gain until the price moves');
+  {
+    const { c, inv } = pricedBook();
+    const st = c.invState(c.inv(inv.id));
+    ok('1000 units were bought', Math.abs(st.units - 1000) < 0.01, String(st.units));
+    ok('and at the price it was bought at there is no gain', Math.abs(st.gain) < 1,
+      String(st.gain));
+    ok('the stored price is the one from the day it was added',
+      +c.inv(inv.id).currentNav === 89.5712, String(c.inv(inv.id).currentNav));
+  }
+
+  console.log('\nRefreshing prices brings gain, return and XIRR to the new valuation');
+  {
+    const { c, inv } = pricedBook({ nav: 100, navDate: '2026-09-15' });
+    await c.refreshInvestmentNavs();
+
+    const got = c.inv(inv.id);
+    ok('the holding takes the new price', +got.currentNav === 100, String(got.currentNav));
+    ok('and the date that price is from', got.navDate === '2026-09-15', got.navDate);
+
+    const st = c.invState(got);
+    ok('the value follows the price', Math.abs(st.value - 100000) < 1, String(st.value));
+    ok('the gain appears', Math.abs(st.gain - 10428.8) < 1, String(st.gain));
+    ok('and the return with it', st.returnPct > 11 && st.returnPct < 12, String(st.returnPct));
+    ok('XIRR is now computable', st.xirr !== null, String(st.xirr));
+    ok('and is about 11.6% over the year held',
+      st.xirr > 11 && st.xirr < 12.5, String(st.xirr));
+    ok('nothing was bought or sold to make that happen',
+      c.state.db.txns.length === 1 && c.state.db.invTxns.length === 1);
+  }
+
+  console.log('\nThe closing flow is dated today, not the day of the last purchase');
+  {
+    const { c, inv } = pricedBook({ nav: 100, navDate: '2026-09-15' });
+    await c.refreshInvestmentNavs();
+    const flows = mmFlows(c.invTxnsFor(inv.id), c.invValue(c.inv(inv.id)));
+    ok('there are two flows: the purchase and the valuation', flows.length === 2,
+      String(flows.length));
+    ok('the first is money going out', flows[0].amount < 0, String(flows[0].amount));
+    ok('on the day it was bought', flows[0].date === '2025-09-15', flows[0].date);
+    ok('the last is the value coming back', flows[1].amount > 0, String(flows[1].amount));
+    ok('dated TODAY, which is what makes the rate an as-at-today rate',
+      flows[1].date === mmIsoOf(new Date()), flows[1].date);
+
+    /* The same holding valued as at an earlier date gives a different, higher
+       rate — proof the date is doing real work rather than being decorative. */
+    const early = mmXirrOf(mmFlows(c.invTxnsFor(inv.id), 100000, '2026-03-15'));
+    const now = mmXirrOf(mmFlows(c.invTxnsFor(inv.id), 100000));
+    ok('a shorter holding period gives a higher annualised rate', early > now,
+      early + ' vs ' + now);
+  }
+
+  console.log('\nAn unchanged price does not churn the book');
+  {
+    const { c, inv } = pricedBook({ nav: 89.5712, navDate: '2026-09-11' });
+    const revBefore = c.rev;
+    await c.refreshInvestmentNavs();
+    ok('nothing was written when the price had not moved', c.rev === revBefore,
+      c.rev + ' vs ' + revBefore);
+    ok('and the price is untouched', +c.inv(inv.id).currentNav === 89.5712);
+  }
+
+  console.log('\nA failed price fetch changes nothing at all');
+  {
+    for (const mode of ['fail', 'zero']) {
+      const { c, inv } = pricedBook(mode);
+      const revBefore = c.rev;
+      await c.refreshInvestmentNavs();
+      ok('a "' + mode + '" reply leaves the price alone',
+        +c.inv(inv.id).currentNav === 89.5712, String(c.inv(inv.id).currentNav));
+      ok('and its date alone', c.inv(inv.id).navDate === '2026-09-11',
+        c.inv(inv.id).navDate);
+      ok('and writes nothing', c.rev === revBefore, c.rev + ' vs ' + revBefore);
+      ok('the refresh stops running', c.state.navBusy === false);
+    }
+  }
+
+  console.log('\nPrices refresh themselves, once, when the tab is opened');
+  {
+    const { c } = pricedBook({ nav: 100, navDate: '2026-09-15' });
+    let calls = 0;
+    const under = c.api;
+    c.api = function (u) { if (/\/funds\/\d+$/.test(u)) calls++; return under(u); };
+
+    c.state.tab = 'Ledger';
+    c.maybeRefreshNavs();
+    ok('nothing happens on another tab', calls === 0, String(calls));
+
+    c.state.tab = 'Investments';
+    c.maybeRefreshNavs();
+    await new Promise((r) => setTimeout(r, 0));
+    ok('opening Investments fetches the price', calls === 1, String(calls));
+    ok('and it landed', +c.state.db.investments[0].currentNav === 100,
+      String(c.state.db.investments[0].currentNav));
+
+    c.maybeRefreshNavs();
+    c.maybeRefreshNavs();
+    await new Promise((r) => setTimeout(r, 0));
+    ok('it does not fetch again and again while you use the tab', calls === 1,
+      String(calls));
+
+    /* The case that matters most. NAV is a working-day figure, so on a Monday
+       the newest published NAV is Friday's and stays older than today no
+       matter how many times it is fetched. Without a once-a-session guard
+       every single render would fire another request, forever. */
+    const fri = pricedBook({ nav: 100, navDate: '2026-09-11' });
+    let n = 0;
+    const u = fri.c.api;
+    fri.c.api = function (url) { if (/\/funds\/\d+$/.test(url)) n++; return u(url); };
+    fri.c.state.tab = 'Investments';
+    for (let i = 0; i < 6; i++) {
+      fri.c.maybeRefreshNavs();
+      await new Promise((r) => setTimeout(r, 0));
+    }
+    ok('a NAV that stays older than today is still only fetched once', n === 1,
+      n + ' requests for a price that can never be dated today');
+    ok('and it did take the price it was given',
+      +fri.c.state.db.investments[0].currentNav === 100,
+      String(fri.c.state.db.investments[0].currentNav));
+
+    /* Same again when the fetch fails: a failure must not become a retry loop. */
+    const bad = pricedBook('fail');
+    let nb = 0;
+    const ub = bad.c.api;
+    bad.c.api = function (url) { if (/\/funds\/\d+$/.test(url)) nb++; return ub(url); };
+    bad.c.state.tab = 'Investments';
+    for (let i = 0; i < 6; i++) {
+      bad.c.maybeRefreshNavs();
+      await new Promise((r) => setTimeout(r, 0));
+    }
+    ok('a failed fetch is not retried on every render either', nb === 1,
+      nb + ' requests after one failure');
+
+    /* Already current: no request at all. */
+    const b = pricedBook({ nav: 100, navDate: '2026-09-15' });
+    let calls2 = 0;
+    const under2 = b.c.api;
+    b.c.api = function (u) { if (/\/funds\/\d+$/.test(u)) calls2++; return under2(u); };
+    b.c.mutate((db) => { db.investments[0].navDate = mmIsoOf(new Date()); });
+    b.c.state.tab = 'Investments';
+    b.c.maybeRefreshNavs();
+    await new Promise((r) => setTimeout(r, 0));
+    ok('a price already dated today is not fetched again', calls2 === 0, String(calls2));
+
+    /* Locked or signed out: never. */
+    const l = pricedBook({ nav: 100, navDate: '2026-09-15' });
+    let calls3 = 0;
+    const under3 = l.c.api;
+    l.c.api = function (u) { if (/\/funds\/\d+$/.test(u)) calls3++; return under3(u); };
+    l.c.state.tab = 'Investments';
+    l.c.setState({ locked: true });
+    l.c.maybeRefreshNavs();
+    await new Promise((r) => setTimeout(r, 0));
+    ok('nothing is fetched behind the lock screen', calls3 === 0, String(calls3));
+  }
+
+  console.log('\nThe screen says what date the figures stand at');
+  {
+    const { c } = pricedBook({ nav: 100, navDate: '2026-09-15' });
+    await c.refreshInvestmentNavs();
+    c.state.tab = 'Investments';
+    const v = c.investVals(c.balances());
+
+    const find = (label) => v.panels.filter((p) => p.label === label)[0];
+    ok('the value says which NAV it is at', /NAV of/.test(find('Current value').note),
+      find('Current value').note);
+    ok('naming the day', /15 Sep|15-09-2026|Sep 2026/i.test(find('Current value').note),
+      find('Current value').note);
+    ok('the gain says the same', /NAV of/.test(find('Gain / loss').note),
+      find('Gain / loss').note);
+    ok('and the return', /NAV of/.test(find('Overall return').note),
+      find('Overall return').note);
+    ok('XIRR says it is annualised to today, which is a different date',
+      /annualised to/.test(find('XIRR').note), find('XIRR').note);
+    ok('there is a Refresh prices button', /Refresh prices/.test(JSON.stringify(v.tableTools)));
+    ok('the note explains it updates itself',
+      /brought up to date on their own/.test(v.tableNote), v.tableNote);
+    ok('and that NAV is daily, not live', /not a live price/.test(v.tableNote), v.tableNote);
+    ok('no note shows NaN or undefined',
+      v.panels.every((p) => !/NaN|undefined|Invalid/.test(String(p.note))),
+      JSON.stringify(v.panels.map((p) => p.note)));
+  }
+
+  console.log('\nA stale price is called stale');
+  {
+    const { c } = pricedBook({ nav: 100, navDate: '2026-06-01' });
+    await c.refreshInvestmentNavs();
+    c.state.tab = 'Investments';
+    const v = c.investVals(c.balances());
+    ok('the note says the price is more than a week old',
+      /more than a week old/.test(v.tableNote), v.tableNote);
+    ok('and the Refresh button is highlighted',
+      v.tableTools.filter((b) => /Refresh prices/.test(b.label))[0].style.indexOf('cfe0f0') >= 0 ||
+      /Refresh prices/.test(JSON.stringify(v.tableTools)),
+      JSON.stringify(v.tableTools.map((b) => b.label)));
+  }
+
+  console.log('\nHand-priced and unpriced holdings are described, not hidden');
+  {
+    const c = book();
+    c.mutate((db) => {
+      db.investments = [
+        { id: 'm1', name: 'HDFC FD', type: 'Fixed Deposit', accountId: 'mf',
+          currentValue: 106000, status: 'active', createdAt: 1, updatedAt: 1 },
+        { id: 'u1', name: 'Something new', type: 'Lump Sum', accountId: 'mf',
+          currentNav: 0, currentValue: 0, status: 'active', createdAt: 1, updatedAt: 1 }
+      ];
+    });
+    const asOf = c.invPricedAsOf();
+    ok('the hand-priced one is counted', asOf.manual === 1, String(asOf.manual));
+    ok('the unpriced one too', asOf.unpriced === 1, String(asOf.unpriced));
+    ok('and neither is counted as linked', asOf.linked === 0, String(asOf.linked));
+
+    c.state.tab = 'Investments';
+    const v = c.investVals(c.balances());
+    ok('the note says how many you priced yourself',
+      /1 holding\(s\) are valued at what you entered/.test(v.tableNote), v.tableNote);
+    ok('and how many have no price at all',
+      /1 have no price yet and are shown at cost/.test(v.tableNote), v.tableNote);
+    ok('the panels say prices came from you, not a NAV',
+      /prices you entered/.test(v.panels[1].note), v.panels[1].note);
+  }
+
+  console.log('\nRefreshing touches only what it should');
+  {
+    const { c, inv } = pricedBook({ nav: 100, navDate: '2026-09-15' });
+    c.mutate((db) => {
+      db.investments.push(
+        { id: 'sold', name: 'Sold up', type: 'Lump Sum', accountId: inv.accountId,
+          schemeCode: '122639', currentNav: 50, navDate: '2025-01-01', status: 'sold',
+          createdAt: 1, updatedAt: 1 },
+        { id: 'manual', name: 'By hand', type: 'Fixed Deposit', accountId: inv.accountId,
+          schemeCode: '', currentValue: 5000, status: 'active', createdAt: 1, updatedAt: 1 });
+    });
+    await c.refreshInvestmentNavs();
+    ok('the open linked holding is updated', +c.inv(inv.id).currentNav === 100);
+    ok('a sold holding is left as it was', +c.inv('sold').currentNav === 50,
+      String(c.inv('sold').currentNav));
+    ok('and an unlinked one is never touched', +c.inv('manual').currentValue === 5000,
+      String(c.inv('manual').currentValue));
   }
 
   console.log('\n' + (fails ? fails + ' FAILURE(S)' : 'all checks passed'));
