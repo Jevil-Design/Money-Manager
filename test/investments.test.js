@@ -1032,6 +1032,160 @@ function withFundSearch(c, result) {
       find('SIPs due').valStyle.indexOf('b3701c') >= 0, find('SIPs due').valStyle);
   }
 
+  /* --------------------------------------------------------------- reports */
+
+  /* A book with a fund, a deposit and gold, so allocation has something to
+     allocate and the maturity tracker has something to track. */
+  function reportBook() {
+    const c = withFundSearch(book());
+    c.mutate((db) => {
+      db.accounts.push(
+        { id: 'fd', name: 'Fixed Deposits', type: 'fd', opening: 0, currency: 'INR', archived: false, createdAt: 1, updatedAt: 1 },
+        { id: 'au', name: 'Gold', type: 'gold', opening: 0, currency: 'INR', archived: false, createdAt: 1, updatedAt: 1 });
+      db.investments = [
+        { id: 'i-mf', name: 'Parag Parikh Flexi Cap', type: 'Lump Sum', accountId: 'mf',
+          schemeCode: '122639', currentNav: 100, navDate: '2026-09-11', status: 'active',
+          institution: 'PPFAS', createdAt: 1, updatedAt: 1 },
+        { id: 'i-fd', name: 'HDFC FD', type: 'Fixed Deposit', accountId: 'fd',
+          currentValue: 106000, rate: 7.1, maturityDate: '2026-11-30', status: 'active',
+          institution: 'HDFC Bank', createdAt: 1, updatedAt: 1 },
+        { id: 'i-fd2', name: 'SBI FD (matured)', type: 'Fixed Deposit', accountId: 'fd',
+          currentValue: 52000, rate: 6.5, maturityDate: '2026-07-01', status: 'active',
+          institution: 'SBI', createdAt: 1, updatedAt: 1 },
+        { id: 'i-au', name: 'Sovereign Gold Bond', type: 'Sovereign Gold Bond', accountId: 'au',
+          currentNav: 7500, status: 'active', institution: 'RBI', createdAt: 1, updatedAt: 1 }
+      ];
+      db.invTxns = [
+        { id: 'x1', investmentId: 'i-mf', date: '2026-01-15', type: 'buy', amount: 40000, units: 500, nav: 80, accountId: 'bank' },
+        { id: 'x2', investmentId: 'i-fd', date: '2025-11-30', type: 'lumpsum', amount: 100000, units: 0, nav: 0, accountId: 'bank' },
+        { id: 'x3', investmentId: 'i-fd2', date: '2025-07-01', type: 'lumpsum', amount: 50000, units: 0, nav: 0, accountId: 'bank' },
+        { id: 'x4', investmentId: 'i-au', date: '2026-02-10', type: 'buy', amount: 60000, units: 10, nav: 6000, accountId: 'bank' }
+      ];
+    });
+    return c;
+  }
+
+  const report = (c, key) => { c.setState({ tab: 'Reports', report: key }); return c.reportVals(c.baseList(), c.balances()); };
+
+  console.log('\nAsset allocation');
+  {
+    const c = reportBook();
+    const v = report(c, 'invalloc');
+    ok('the report exists', v.tableTitle === 'Asset allocation', v.tableTitle);
+    ok('three kinds are held', v.tableRows.length === 3, String(v.tableRows.length));
+
+    const shares = v.tableRows.map((r) => parseFloat(r.cells[6].text));
+    const sum = shares.reduce((m, x) => m + x, 0);
+    ok('the shares add to 100%', Math.abs(sum - 100) < 0.2, String(sum));
+    ok('they are ordered largest first',
+      shares.every((x, i) => i === 0 || shares[i - 1] >= x), JSON.stringify(shares));
+
+    const pf = c.portfolio();
+    ok('the total equals the portfolio', v.panels[0].value === mmInrOf(pf.totals.value),
+      v.panels[0].value + ' vs ' + mmInrOf(pf.totals.value));
+    ok('the number of kinds is reported', v.panels[1].value === '3', v.panels[1].value);
+    ok('and the largest one is named', v.panels[2].note.length > 0, v.panels[2].note);
+    ok('a bar per kind', v.bars.length === 3, String(v.bars.length));
+    ok('and each bar names its share', v.bars.every((b) => /%/.test(b.name)),
+      JSON.stringify(v.bars.map((b) => b.name)));
+    ok('concentration is stated as a fact, not a judgement',
+      /not a judgement/.test(v.tableNote || ''), v.tableNote);
+    ok('nothing shows NaN or undefined',
+      v.tableRows.every((r) => r.cells.every((x) => !/NaN|undefined|Infinity/.test(String(x.text || '')))),
+      JSON.stringify(v.tableRows[0].cells.map((x) => x.text)));
+
+    /* Empty portfolio. */
+    const e = report(book(), 'invalloc');
+    ok('an empty portfolio renders', e.tableRows.length === 0);
+    ok('with a dash for the largest kind, not 0%', e.panels[2].value === '—', e.panels[2].value);
+  }
+
+  console.log('\nInvestment performance');
+  {
+    const c = reportBook();
+    const v = report(c, 'invperf');
+    ok('the report exists', v.tableTitle === 'Investment performance', v.tableTitle);
+    ok('every open holding is listed', v.tableRows.length === 4, String(v.tableRows.length));
+
+    const gains = v.tableRows.map((r) => r.cells[4].text);
+    ok('the best is first — gold, up 15,000', /15,000/.test(gains[0]), gains[0]);
+    ok('and the smallest gain is last', /2,000/.test(gains[gains.length - 1]),
+      gains[gains.length - 1]);
+
+    const pf = c.portfolio();
+    ok('the totals equal the portfolio', v.panels[0].value === mmInrOf(pf.totals.invested),
+      v.panels[0].value);
+    ok('and so does the value', v.panels[1].value === mmInrOf(pf.totals.value), v.panels[1].value);
+    ok('the portfolio XIRR is the whole set of flows, not an average',
+      /not an average/.test(v.panels[3].note) || v.panels[3].value === '—', v.panels[3].note);
+    ok('a hand-priced holding is marked as such',
+      v.tableRows.some((r) => /entered by hand/.test(r.cells[7].text)),
+      JSON.stringify(v.tableRows.map((r) => r.cells[7].text)));
+    ok('and a fund shows the day it was priced',
+      v.tableRows.some((r) => /11-09-2026|2026/.test(r.cells[7].text)),
+      JSON.stringify(v.tableRows.map((r) => r.cells[7].text)));
+    ok('every XIRR cell is a percentage or a dash, never NaN',
+      v.tableRows.every((r) => r.cells[6].text === '—' || /^-?\d+\.\d\d%$/.test(r.cells[6].text)),
+      JSON.stringify(v.tableRows.map((r) => r.cells[6].text)));
+    ok('it says NAV is daily, not live', /not live/.test(v.tableNote || ''), v.tableNote);
+
+    const one = book();
+    one.mutate((db) => {
+      db.investments = [{ id: 'z', name: 'Only one', type: 'Lump Sum', accountId: 'mf', currentNav: 0, currentValue: 1000, status: 'active', createdAt: 1, updatedAt: 1 }];
+    });
+    const v1 = report(one, 'invperf');
+    ok('with a single holding there is no "worst"', v1.panels[5].value === '—', v1.panels[5].value);
+    ok('and it says why', /only one holding/.test(v1.panels[5].note), v1.panels[5].note);
+  }
+
+  console.log('\nMaturity tracker');
+  {
+    const c = reportBook();
+    const v = report(c, 'maturity');
+    ok('the report exists', v.tableTitle === 'Maturity tracker', v.tableTitle);
+    ok('only dated holdings appear', v.tableRows.length === 2, String(v.tableRows.length));
+    ok('the soonest is first', /SBI/.test(v.tableRows[0].cells[0].text), v.tableRows[0].cells[0].text);
+    ok('one has already matured', v.tableRows[0].cells[4].text === 'matured',
+      v.tableRows[0].cells[4].text);
+    ok('and is flagged in red', /fdf2f2/.test(v.tableRows[0].style), v.tableRows[0].style);
+    ok('the other counts down in days', /^\d+$/.test(v.tableRows[1].cells[4].text),
+      v.tableRows[1].cells[4].text);
+    ok('the count is right — 30 November is 76 days from 15 September',
+      v.tableRows[1].cells[4].text === '76', v.tableRows[1].cells[4].text);
+    ok('the rate is shown', /7\.10%/.test(v.tableRows[1].cells[5].text), v.tableRows[1].cells[5].text);
+
+    ok('the next maturity ahead is named', /HDFC FD/.test(v.panels[1].note), v.panels[1].note);
+    ok('and it is the one in the future, not the one behind',
+      /30-11-2026/.test(v.panels[1].value), v.panels[1].value);
+    ok('within 90 days counts it', v.panels[2].value === '1', v.panels[2].value);
+    ok('the matured one is counted separately', v.panels[3].value === '1', v.panels[3].value);
+    ok('and says what to do about it', /close or roll/.test(v.panels[3].note), v.panels[3].note);
+    ok('nothing is closed on your behalf', /nothing is changed on your behalf/i.test(v.tableNote || ''),
+      v.tableNote);
+    ok('the value maturing is the sum of the two', v.panels[4].value === mmInrOf(158000),
+      v.panels[4].value);
+
+    const e = report(book(), 'maturity');
+    ok('with nothing dated it still renders', e.tableRows.length === 0);
+    ok('and says so rather than showing a date', e.panels[1].value === '—', e.panels[1].value);
+  }
+
+  console.log('\nThe new reports export like the old ones');
+  {
+    const c = reportBook();
+    ['invalloc', 'invperf', 'maturity'].forEach((k) => {
+      const v = report(c, k);
+      ok(k + ' has a header for every cell',
+        v.tableRows.every((r) => r.cells.length === v.tableCols.length),
+        k + ': ' + (v.tableRows[0] ? v.tableRows[0].cells.length : 0) + ' vs ' + v.tableCols.length);
+      ok(k + ' has a label on every column',
+        v.tableCols.every((col) => typeof col.label === 'string'),
+        JSON.stringify(v.tableCols.map((x) => x.label)));
+      ok(k + ' is offered in the report list',
+        JSON.stringify(v.tableTools).indexOf(v.tableTitle) >= 0, v.tableTitle);
+    });
+  }
+
   console.log('\n' + (fails ? fails + ' FAILURE(S)' : 'all checks passed'));
   process.exit(fails ? 1 : 0);
 })().catch((e) => { console.error(e); process.exit(1); });

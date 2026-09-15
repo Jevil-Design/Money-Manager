@@ -7152,7 +7152,9 @@ class Component extends DCLogic {
       { k: 'cash', l: 'Cash flow' }, { k: 'net', l: 'Net worth' }, { k: 'trend', l: 'Net worth trend' },
       { k: 'cards', l: 'Credit card summary' }, { k: 'loans', l: 'Loan summary' }, { k: 'interest', l: 'Interest paid' },
       { k: 'fixvar', l: 'Fixed vs variable' }, { k: 'recurexp', l: 'Recurring expenses' }, { k: 'savings', l: 'Savings rate' },
-      { k: 'payment', l: 'By payment method' }, { k: 'tags', l: 'By tag' }, { k: 'reimb', l: 'Reimbursable' }
+      { k: 'payment', l: 'By payment method' }, { k: 'tags', l: 'By tag' }, { k: 'reimb', l: 'Reimbursable' },
+      { k: 'invalloc', l: 'Asset allocation' }, { k: 'invperf', l: 'Investment performance' },
+      { k: 'maturity', l: 'Maturity tracker' }
     ];
     var tools = defs.map(function (d) { return self.btn(d.l, function () { self.setState({ report: d.k }); }, s.report === d.k ? 'active' : null); });
     tools.push(this.btn('⤓ Export CSV', function () { self.exportReport(); }));
@@ -7492,6 +7494,172 @@ class Component extends DCLogic {
         };
       });
       panels = [this.panel({ label: 'Total', value: mmInr(totP2), note: lp.length + (key === 'tags' ? ' tags' : ' methods') })];
+    } else if (key === 'invalloc') {
+      /* Allocation is share of current value, not of what was paid: what you
+         are exposed to today is what matters for how spread out you are. */
+      title = 'Asset allocation';
+      sub = 'by what each kind is worth today, not what it cost';
+      var pfA = this.portfolio();
+      var groupsA = MM_INV_GROUPS.map(function (g) {
+        var b = pfA.byGroup[g.key];
+        return b ? { key: g.key, label: g.label, b: b } : null;
+      }).filter(Boolean).sort(function (a, b) { return b.b.value - a.b.value; });
+      var maxA = groupsA.reduce(function (m2, x) { return Math.max(m2, x.b.value); }, 0);
+      bars = groupsA.map(function (x) {
+        return mkBar(x.label + '  ·  ' + x.b.share.toFixed(1) + '%', x.b.value, maxA,
+          function () { self.setState({ tab: 'Investments', invView: 'holdings' }); },
+          x.b.gain < 0 ? 'linear-gradient(var(--c-e08b83),var(--c-c1544a))' : null);
+      });
+      cols = [this.tcol('Kind', '200px'), this.tcol('Holdings', '90px', 'right'),
+        this.tcol('Invested', '130px', 'right'), this.tcol('Value', '130px', 'right'),
+        this.tcol('Gain / loss', '130px', 'right'), this.tcol('Return', '90px', 'right'),
+        this.tcol('Share', '90px', 'right'), this.tcol('', 'auto')];
+      rows = groupsA.map(function (x, i) {
+        var col = x.b.gain > 0 ? 'var(--c-1a6b3c)' : x.b.gain < 0 ? 'var(--c-a3241f)' : 'var(--c-3c5163)';
+        return {
+          style: self.rowStyle(i, false), click: null,
+          cells: [self.tcell(x.label, '200px', 'left', { bold: true }),
+            self.tcell(String(x.b.count), '90px', 'right'),
+            self.tcell(mmInr(x.b.invested), '130px', 'right'),
+            self.tcell(mmInr(x.b.value), '130px', 'right', { bold: true }),
+            self.tcell(mmInr(x.b.gain), '130px', 'right', { color: col }),
+            self.tcell(x.b.invested > 0 ? x.b.returnPct.toFixed(2) + '%' : '—', '90px', 'right', { color: col }),
+            self.tcell(x.b.share.toFixed(1) + '%', '90px', 'right', { bold: true }),
+            self.tcell('', 'auto')]
+        };
+      });
+      var biggestA = groupsA[0];
+      panels = [
+        this.panel({ label: 'Portfolio value', value: mmInr(pfA.totals.value), note: pfA.rows.length + ' holding(s)' }),
+        this.panel({ label: 'Kinds held', value: String(groupsA.length), note: 'more kinds, less riding on any one' }),
+        this.panel({
+          label: 'Largest kind',
+          value: biggestA ? biggestA.b.share.toFixed(1) + '%' : '—',
+          note: biggestA ? biggestA.label : 'nothing invested',
+          color: biggestA && biggestA.b.share > 70 ? 'var(--c-b3701c)' : 'var(--c-14416e)'
+        })
+      ];
+      note = 'Concentration is a fact here, not a judgement: the share of the largest kind is shown ' +
+        'so you can see it, and no target allocation is assumed on your behalf.';
+
+    } else if (key === 'invperf') {
+      title = 'Investment performance';
+      sub = 'every open holding, at its latest known value';
+      var pfP = this.portfolio();
+      var listP = pfP.rows.slice().sort(function (a, b) { return b.st.gain - a.st.gain; });
+      cols = [this.tcol('Investment', '220px'), this.tcol('Kind', '140px'),
+        this.tcol('Invested', '130px', 'right'), this.tcol('Value', '130px', 'right'),
+        this.tcol('Gain / loss', '130px', 'right'), this.tcol('Return', '90px', 'right'),
+        this.tcol('XIRR', '90px', 'right'), this.tcol('Priced', '110px'), this.tcol('', 'auto')];
+      rows = listP.map(function (x, i) {
+        var col = x.st.gain > 0 ? 'var(--c-1a6b3c)' : x.st.gain < 0 ? 'var(--c-a3241f)' : 'var(--c-3c5163)';
+        return {
+          style: self.rowStyle(i, false),
+          click: function () { self.setState({ tab: 'Investments', invView: 'holdings' }); },
+          cells: [self.tcell(x.inv.name || '(unnamed)', '220px', 'left', { bold: true }),
+            self.tcell(x.inv.type || '', '140px'),
+            self.tcell(mmInr(x.st.invested), '130px', 'right'),
+            self.tcell(mmInr(x.st.value), '130px', 'right', { bold: true }),
+            self.tcell(mmInr(x.st.gain), '130px', 'right', { color: col }),
+            self.tcell(x.st.invested > 0 ? x.st.returnPct.toFixed(2) + '%' : '—', '90px', 'right', { color: col }),
+            /* A rate that cannot be computed is a dash. Zero is a real rate. */
+            self.tcell(x.st.xirr === null ? '—' : x.st.xirr.toFixed(2) + '%', '90px', 'right'),
+            self.tcell(x.inv.navDate ? mmDmy(x.inv.navDate) : 'entered by hand', '110px', 'left',
+              { color: x.inv.navDate ? 'var(--c-5b7186)' : 'var(--c-b3701c)' }),
+            self.tcell('', 'auto')]
+        };
+      });
+      var maxP2 = listP.reduce(function (m2, x) { return Math.max(m2, Math.abs(x.st.gain)); }, 0);
+      bars = listP.slice(0, 14).map(function (x) {
+        return mkBar(x.inv.name, x.st.gain, maxP2, null,
+          x.st.gain < 0 ? 'linear-gradient(var(--c-e08b83),var(--c-c1544a))' : null);
+      });
+      var best = listP[0], worst = listP[listP.length - 1];
+      panels = [
+        this.panel({ label: 'Invested', value: mmInr(pfP.totals.invested) }),
+        this.panel({ label: 'Worth today', value: mmInr(pfP.totals.value), color: 'var(--c-14416e)' }),
+        this.panel({
+          label: 'Gain / loss', value: mmInr(pfP.totals.gain),
+          note: pfP.totals.invested > 0 ? pfP.totals.returnPct.toFixed(2) + '%' : 'nothing invested',
+          color: pfP.totals.gain > 0 ? 'var(--c-1a6b3c)' : pfP.totals.gain < 0 ? 'var(--c-a3241f)' : 'var(--c-14416e)'
+        }),
+        this.panel({
+          label: 'Portfolio XIRR',
+          value: pfP.totals.xirr === null ? '—' : pfP.totals.xirr.toFixed(2) + '%',
+          note: pfP.totals.xirr === null ? 'needs dated purchases and a value' : 'every flow together, not an average'
+        }),
+        this.panel({
+          label: 'Best', value: best ? mmInr(best.st.gain) : '—',
+          note: best ? best.inv.name : 'nothing invested', color: 'var(--c-1a6b3c)'
+        }),
+        this.panel({
+          label: 'Worst', value: worst && listP.length > 1 ? mmInr(worst.st.gain) : '—',
+          note: worst && listP.length > 1 ? worst.inv.name : 'only one holding',
+          color: 'var(--c-a3241f)'
+        })
+      ];
+      note = 'Mutual funds are valued at the NAV last published, which is once a working day and not live. ' +
+        'Anything priced by hand is marked as such.';
+
+    } else if (key === 'maturity') {
+      title = 'Maturity tracker';
+      sub = 'deposits and anything else with a date it comes back';
+      var todayM = mmIso(new Date());
+      var listM = (db.investments || []).filter(function (x) {
+        return x.status !== 'closed' && x.status !== 'sold' &&
+          /^\d{4}-\d{2}-\d{2}$/.test(String(x.maturityDate || ''));
+      }).sort(function (a, b) { return a.maturityDate < b.maturityDate ? -1 : 1; });
+      cols = [this.tcol('Investment', '220px'), this.tcol('Kind', '130px'),
+        this.tcol('Institution', '150px'), this.tcol('Matures', '100px'),
+        this.tcol('Days', '80px', 'right'), this.tcol('Rate', '80px', 'right'),
+        this.tcol('Invested', '130px', 'right'), this.tcol('Value now', '130px', 'right'),
+        this.tcol('', 'auto')];
+      var within90 = 0, matured = 0, totalM = 0;
+      rows = listM.map(function (x, i) {
+        var st = self.invState(x);
+        var days = mmDaysBetween(todayM, x.maturityDate);
+        totalM += st.value;
+        if (days < 0) matured++;
+        else if (days <= 90) within90++;
+        var col = days < 0 ? 'var(--c-a3241f)' : days <= 30 ? 'var(--c-b3701c)' : 'var(--c-3c5163)';
+        return {
+          style: self.rowStyle(i, false) +
+            (days < 0 ? ';background:var(--c-fdf2f2)' : days <= 30 ? ';background:var(--c-fff8e6)' : ''),
+          click: function () { self.setState({ tab: 'Investments', invView: 'holdings' }); },
+          cells: [self.tcell(x.name || '(unnamed)', '220px', 'left', { bold: true }),
+            self.tcell(x.type || '', '130px'),
+            self.tcell(x.institution || '—', '150px'),
+            self.tcell(mmDmy(x.maturityDate), '100px'),
+            self.tcell(days < 0 ? 'matured' : String(days), '80px', 'right', { bold: days <= 30, color: col }),
+            self.tcell(+x.rate > 0 ? (+x.rate).toFixed(2) + '%' : '—', '80px', 'right'),
+            self.tcell(mmInr(st.invested), '130px', 'right'),
+            self.tcell(mmInr(st.value), '130px', 'right', { bold: true }),
+            self.tcell('', 'auto')]
+        };
+      });
+      var nextM = listM.filter(function (x) { return x.maturityDate >= todayM; })[0];
+      panels = [
+        this.panel({ label: 'Dated holdings', value: String(listM.length), note: 'with a maturity date set' }),
+        this.panel({
+          label: 'Next maturity',
+          value: nextM ? mmDmy(nextM.maturityDate) : '—',
+          note: nextM ? nextM.name + ' · in ' + mmDaysBetween(todayM, nextM.maturityDate) + ' days' : 'nothing dated ahead'
+        }),
+        this.panel({
+          label: 'Within 90 days', value: String(within90),
+          note: 'money to decide about soon',
+          color: within90 ? 'var(--c-b3701c)' : 'var(--c-14416e)'
+        }),
+        this.panel({
+          label: 'Already matured', value: String(matured),
+          note: matured ? 'still marked active — close or roll them over' : 'none outstanding',
+          color: matured ? 'var(--c-a3241f)' : 'var(--c-14416e)'
+        }),
+        this.panel({ label: 'Value maturing', value: mmInr(totalM), note: 'across every dated holding' })
+      ];
+      note = 'Only holdings with a maturity date appear here. A matured holding is not closed for you — ' +
+        'nothing is changed on your behalf.';
+
     } else if (key === 'reimb') {
       title = 'Reimbursable expenses'; sub = 'money spent that someone owes back';
       var listX = base.filter(function (t) { return t.reimb; });
