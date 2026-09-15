@@ -67,7 +67,22 @@ function explain(h) {
       console.log('\nOptional: AUTH_SECRET is not set. Sessions work without it; setting it');
       console.log('means a database dump holds nothing replayable as a login.');
     }
-    if (h.accessPolicy !== 'allowlist') {
+    /* The advice has to match the policy actually in force. Telling someone
+       their deployment is locked to one account when signups are open would
+       push them into changing a setting they deliberately chose. */
+    if (h.signups === 'open') {
+      console.log('\nSignups are OPEN: anyone who has the URL can create an account, which is');
+      console.log('the setting this deployment was given on purpose. Rate limits apply per');
+      if (!h.maxAccounts) {
+        console.log('caller, but no MAX_ACCOUNTS ceiling is set, so the total is unbounded.');
+        console.log('Set MAX_ACCOUNTS if you want a hard cap.');
+      } else {
+        console.log('caller, and MAX_ACCOUNTS caps the total at ' + h.maxAccounts + '.');
+      }
+    } else if (h.signups === 'closed') {
+      console.log('\nSignups are CLOSED: no new account can be created until ALLOW_SIGNUPS is');
+      console.log('changed. Existing accounts sign in as normal.');
+    } else if (h.signups === 'allowlist' && h.accessPolicy !== 'allowlist') {
       console.log('\nWorth doing before you share the URL: ALLOWED_EMAILS is not set, so the');
       console.log('FIRST account to register claims this deployment and everyone after is');
       console.log('refused. Set it to the addresses that should be able to sign up.');
