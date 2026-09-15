@@ -1830,8 +1830,9 @@ var MM_COLLECTIONS = ['accounts', 'txns', 'categories', 'budgets', 'recurring', 
      filtering, sorting and duplicate detection can work on.
        investments  what is held, and what it is currently worth
        invTxns      every purchase, withdrawal, dividend and maturity
-       sips         the standing instructions that create invTxns over time */
-  'investments', 'invTxns', 'sips'];
+       sips         the standing instructions that create invTxns over time
+       watchlist    schemes being followed but not owned */
+  'investments', 'invTxns', 'sips', 'watchlist'];
 
 /* What can be held. Sub-types matter because the maths differs: a deposit
    accrues to a known maturity value, a fund is units times NAV, gold is a
@@ -2010,7 +2011,7 @@ function mmSeed() {
     /* Investments start empty even in the sample book: example holdings
        would be fabricated market data, which is exactly what must not be
        invented. */
-    investments: [], invTxns: [], sips: [],
+    investments: [], invTxns: [], sips: [], watchlist: [],
     tags: ['#office', '#travel', '#family', '#salary', '#reimbursable'],
     payments: MM_PAY.slice(),
     settings: {
@@ -4425,7 +4426,8 @@ class Component extends DCLogic {
       rule: this.saveRule, loanpay: this.saveLoanPay, recon: this.saveRecon, view: this.saveView,
       goaltop: this.saveGoalTopUp, delacct: this.confirmDeleteAccount, catmerge: this.confirmCatMerge,
       password: this.changePassword, delaccount: this.deleteAccountNow,
-      investment: this.saveInvestment, invtxn: this.saveInvTxn, sip: this.saveSip
+      investment: this.saveInvestment, invtxn: this.saveInvTxn, sip: this.saveSip,
+      watch: this.saveWatch
     };
     if (by[d.kind]) { by[d.kind].call(this); return true; }
     return false;
@@ -6340,8 +6342,231 @@ class Component extends DCLogic {
       this.btn('SIPs', function () { self.setState({ invView: 'sips' }); },
         view === 'sips' ? 'active' : null),
       this.btn('Goals', function () { self.setState({ invView: 'goals' }); },
-        view === 'goals' ? 'active' : null)
+        view === 'goals' ? 'active' : null),
+      this.btn('Watchlist', function () { self.setState({ invView: 'watch' }); },
+        view === 'watch' ? 'active' : null)
     ];
+  }
+
+  /* ---- the watchlist: schemes followed, not owned ------------------------
+     Kept apart from holdings on purpose. Nothing here counts towards net
+     worth, the portfolio or any return, because none of this money is yours
+     yet — a watched fund that has doubled has earned you nothing.
+     ---------------------------------------------------------------------- */
+
+  openWatch() {
+    this.setState({
+      dlg: {
+        kind: 'watch', mode: 'add',
+        data: {
+          schemeCode: '', isin: '', name: '', amc: '', plan: '', option: '',
+          nav: 0, navDate: '', note: '',
+          fundQuery: '', fundResults: null, fundBusy: false, fundError: ''
+        }
+      }
+    });
+  }
+
+  /* The same server-side lookup the investment dialog uses. */
+  watchFundSearch() {
+    var self = this;
+    var d = this.state.dlg;
+    if (!d || d.kind !== 'watch') return Promise.resolve();
+    var q = String(d.data.fundQuery || '').trim();
+    if (q.length < 2) {
+      this.dlgSet({ fundError: 'Type at least two characters.' });
+      return Promise.resolve();
+    }
+    this.dlgSet({ fundBusy: true, fundError: '', fundResults: null });
+    return this.api('/api/v1/funds/search?q=' + encodeURIComponent(q) + '&limit=25')
+      .then(function (r) {
+        var list = (r && r.funds) || [];
+        self.dlgSet({
+          fundBusy: false, fundResults: list,
+          fundError: list.length
+            ? (r.catalogue && r.catalogue.stale
+              ? 'Showing the last downloaded fund list — it could not be refreshed just now.' : '')
+            : 'No scheme matched “' + q + '”.'
+        });
+      })
+      .catch(function (e) {
+        /* A failed lookup adds nothing. There is no such thing as a guessed fund. */
+        self.dlgSet({
+          fundBusy: false, fundResults: [],
+          fundError: e && e.status === 0
+            ? 'Could not reach the server to look that up. Nothing has been added.'
+            : (e.message || 'That search could not be completed.')
+        });
+      });
+  }
+
+  watchPickFund(f) {
+    this.dlgSet({
+      schemeCode: f.schemeCode, isin: f.isinEffective || f.isin || '',
+      name: f.name || '', amc: f.amc || '', plan: f.plan || '', option: f.option || '',
+      nav: f.nav || 0, navDate: f.navDate || '',
+      fundResults: null, fundError: ''
+    });
+  }
+
+  saveWatch() {
+    var d = this.state.dlg, a = Object.assign({}, d.data);
+    if (!a.schemeCode) { this.flash('Search for the scheme and choose it first.'); return; }
+    if (this.state.db.watchlist.some(function (w) { return w.schemeCode === a.schemeCode; })) {
+      this.flash('That scheme is already on the watchlist.');
+      return;
+    }
+    ['fundQuery', 'fundResults', 'fundBusy', 'fundError'].forEach(function (k) { delete a[k]; });
+    this.pushUndo('adding a scheme to the watchlist', ['watchlist']);
+    this.mutate(function (db) {
+      a.id = mmUid();
+      a.note = String(a.note || '');
+      a.createdAt = Date.now();
+      a.updatedAt = Date.now();
+      a.demo = false;
+      db.watchlist.push(a);
+    }, a.name + ' added to the watchlist. Nothing has been bought.');
+    this.setState({ dlg: null });
+  }
+
+  removeWatch(w) {
+    var self = this;
+    this.pushUndo('removing a scheme from the watchlist', ['watchlist']);
+    this.mutate(function (db) {
+      db.watchlist = db.watchlist.filter(function (x) { return x.id !== w.id; });
+    });
+    this.flashUndo('Removed from the watchlist.', 'removing a scheme from the watchlist');
+  }
+
+  /* Fetch today's NAV for everything being watched. One request per scheme,
+     and a scheme that fails keeps the NAV it already had rather than being
+     blanked or guessed at. */
+  refreshWatch() {
+    var self = this;
+    var list = (this.state.db.watchlist || []).slice();
+    if (!list.length) { this.flash('There is nothing on the watchlist.'); return Promise.resolve(); }
+    this.setState({ watchBusy: true });
+    return Promise.all(list.map(function (w) {
+      return self.api('/api/v1/funds/' + encodeURIComponent(w.schemeCode))
+        .then(function (r) {
+          var f = (r && (r.fund || r)) || {};
+          return +f.nav > 0 ? { id: w.id, nav: f.nav, navDate: f.navDate || '' } : null;
+        })
+        .catch(function () { return null; });
+    })).then(function (results) {
+      var got = results.filter(Boolean);
+      self.setState({ watchBusy: false });
+      if (!got.length) {
+        self.flash('No prices could be fetched just now. Nothing has been changed.');
+        return;
+      }
+      self.mutate(function (db) {
+        got.forEach(function (g) {
+          db.watchlist.forEach(function (w) {
+            if (w.id !== g.id) return;
+            w.nav = g.nav; w.navDate = g.navDate; w.updatedAt = Date.now();
+          });
+        });
+      }, got.length === list.length
+        ? 'Prices updated for all ' + got.length + ' scheme(s).'
+        : 'Prices updated for ' + got.length + ' of ' + list.length +
+          ' — the rest kept the price they had.');
+    });
+  }
+
+  /* Move a watched scheme into the portfolio. It arrives in the ordinary Add
+     investment dialog, already identified, so buying it is the same flow and
+     the same accounting as anything else. */
+  investFromWatch(w) {
+    this.openInvestment('add', {});
+    this.dlgSet({
+      schemeCode: w.schemeCode, isin: w.isin || '', amc: w.amc || '',
+      plan: w.plan || '', option: w.option || '', fundName: w.name || '',
+      name: w.name + (w.plan ? ' — ' + w.plan : ''),
+      currentNav: w.nav || 0, navDate: w.navDate || '', buyNav: w.nav || 0,
+      type: 'Lump Sum'
+    });
+    return true;
+  }
+
+  watchVals() {
+    var self = this, list = this.state.db.watchlist || [];
+    var today = mmIso(new Date());
+
+    var rows = list.slice().sort(function (a, b) {
+      return (a.name || '') < (b.name || '') ? -1 : (a.name || '') > (b.name || '') ? 1 : 0;
+    }).map(function (w, i) {
+      var age = w.navDate ? mmDaysBetween(w.navDate, today) : null;
+      return {
+        key: w.id,
+        style: self.rowStyle(i, false),
+        click: null,
+        cells: [
+          self.tcell(w.name || '(unnamed)', '240px', 'left', { bold: true }),
+          self.tcell([w.plan, w.option].filter(Boolean).join(' · ') || '—', '170px'),
+          self.tcell(w.amc || '—', '150px'),
+          self.tcell(+w.nav > 0 ? mmInr(w.nav) : '—', '110px', 'right', { bold: true }),
+          /* The age of the price is shown, not hidden: a NAV from a fortnight
+             ago is not today's price and should not be read as one. */
+          self.tcell(w.navDate ? mmDmy(w.navDate) : 'never fetched', '110px', 'left',
+            { color: age !== null && age > 7 ? 'var(--c-b3701c)' : 'var(--c-5b7186)' }),
+          self.tcell(w.note || '', '170px', 'left', { color: 'var(--c-5b7186)' }),
+          self.tacts([
+            { label: 'Invest in this…', go: function (e) { e.stopPropagation(); self.investFromWatch(w); } },
+            { label: 'Remove', danger: true, go: function (e) { e.stopPropagation(); self.removeWatch(w); } }
+          ], '230px')
+        ]
+      };
+    });
+
+    var dated = list.filter(function (w) { return !!w.navDate; });
+    var oldest = dated.reduce(function (m, w) { return (!m || w.navDate < m) ? w.navDate : m; }, '');
+    var held = {};
+    (this.state.db.investments || []).forEach(function (inv) {
+      if (inv.schemeCode) held[inv.schemeCode] = true;
+    });
+    var alreadyHeld = list.filter(function (w) { return held[w.schemeCode]; }).length;
+
+    return {
+      isTable: true,
+      tableTitle: 'Watchlist',
+      tableSub: list.length
+        ? list.length + ' scheme' + (list.length === 1 ? '' : 's') +
+          ' followed — none of this counts towards net worth, because none of it is yours'
+        : 'schemes you are following but have not bought',
+      tableTools: this.invViewTools('watch').concat([
+        this.btn(this.state.watchBusy ? 'Fetching…' : 'Refresh prices',
+          function () { self.refreshWatch(); }, list.length ? 'active' : null),
+        this.btn('+ Watch a scheme', function () { self.openWatch(); }, 'primary')
+      ]),
+      tableCols: [
+        this.tcol('Scheme', '240px'), this.tcol('Plan / option', '170px'),
+        this.tcol('AMC', '150px'), this.tcol('NAV', '110px', 'right'),
+        this.tcol('Priced', '110px'), this.tcol('Note', '170px'),
+        this.tcol('Actions', '230px', 'right')
+      ],
+      tableRows: rows, tableEmpty: rows.length === 0,
+      emptyMsg: 'Nothing on the watchlist. Follow a scheme to keep an eye on its NAV without buying it.',
+      emptyBtn: '+ Watch a scheme',
+      emptyGo: function () { self.openWatch(); },
+      hasPanels: true, hasBars: false, hasFoot: false,
+      panels: [
+        this.panel({ label: 'Following', value: String(list.length), note: 'schemes, none of them owned' }),
+        this.panel({
+          label: 'Oldest price', value: oldest ? mmDmy(oldest) : '—',
+          note: oldest ? mmDaysBetween(oldest, today) + ' days old' : 'nothing fetched yet',
+          color: oldest && mmDaysBetween(oldest, today) > 7 ? 'var(--c-b3701c)' : 'var(--c-14416e)'
+        }),
+        this.panel({
+          label: 'Already held', value: String(alreadyHeld),
+          note: alreadyHeld ? 'also in your portfolio' : 'none of these are in your portfolio'
+        })
+      ],
+      hasTableNote: true,
+      tableNote: 'A watched scheme is a bookmark with a price on it. It is deliberately kept out of the ' +
+        'portfolio, net worth and every return, because you do not own it. Prices are the published NAV ' +
+        'and are dated — refresh to fetch today’s.'
+    };
   }
 
   /* ---- one holding, on its own ------------------------------------------ */
@@ -6591,6 +6816,7 @@ class Component extends DCLogic {
   investVals(bal) {
     var self = this;
     if (this.state.invView === 'sips') return this.sipVals();
+    if (this.state.invView === 'watch') return this.watchVals();
     if (this.state.invDetail && this.inv(this.state.invDetail)) return this.invDetailVals();
     /* Savings goals kept their own screen until the tab became Investments.
        The data was never touched; this is where it now lives. */
@@ -10777,6 +11003,56 @@ class Component extends DCLogic {
         'so your books stay right; the current value is what makes net worth reflect the market.';
       buttons = [cancel, this.btn(d.mode === 'edit' ? 'Save' : 'Add investment',
         function () { self.saveInvestment(); }, 'primary')];
+
+    } else if (d.kind === 'watch') {
+      a = d.data;
+      title = 'Watch a scheme';
+      width = 620;
+      fields.push(this.fld('Find the fund', 'text', a.fundQuery, set('fundQuery'), {
+        focus: true, hint: 'name, AMC, scheme code or ISIN — then press Search'
+      }));
+      fields.push(this.fld('', 'buttons', '', null, {
+        buttons: [
+          this.btn(a.fundBusy ? 'Searching…' : 'Search funds',
+            function () { self.watchFundSearch(); }, 'primary')
+        ]
+      }));
+      if (a.schemeCode) {
+        fields.push(this.fld('Scheme', 'static',
+          a.name + '\n' + (a.amc || '') +
+          '\n' + [a.plan, a.option].filter(Boolean).join(' · ') +
+          '\nCode ' + a.schemeCode + (a.isin ? '  ·  ISIN ' + a.isin : ''),
+          null, { wrap: true }));
+        fields.push(this.fld('NAV', 'static', (+a.nav > 0 ? mmInr(a.nav) : 'not available'), null, {
+          hint: a.navDate ? 'as of ' + mmNiceDate(a.navDate) : 'no NAV date, so this value is not dated'
+        }));
+      }
+      if (a.fundError) {
+        fields.push(this.fld('', 'static', a.fundError, null,
+          { wrap: true, color: 'var(--c-8c2a24)' }));
+      }
+      if (a.fundResults && a.fundResults.length) {
+        tCols = [this.tcol('Scheme', '250px'), this.tcol('Plan / option', '175px'),
+          this.tcol('NAV', '95px', 'right'), this.tcol('As of', '92px'), this.tcol('', '70px', 'right')];
+        tRows = a.fundResults.map(function (f) {
+          return {
+            key: f.schemeCode, style: self.rowStyle(0, false),
+            go: function () { self.watchPickFund(f); },
+            cells: [
+              self.tcell(f.name, '250px'),
+              self.tcell([f.plan, f.option].filter(Boolean).join(' · '), '175px'),
+              self.tcell(f.nav ? mmInr(f.nav) : '—', '95px', 'right'),
+              self.tcell(f.navDate ? mmNiceDate(f.navDate) : '—', '92px'),
+              self.tacts([{ label: 'Use', go: function (e) { e.stopPropagation(); self.watchPickFund(f); } }], '70px')
+            ]
+          };
+        });
+      }
+      fields.push(this.fld('Note', 'text', a.note, set('note'),
+        { hint: 'why you are watching it — optional' }));
+      note = 'Watching costs nothing and buys nothing. A scheme here stays out of your portfolio, ' +
+        'out of net worth and out of every return until you actually invest in it.';
+      buttons = [cancel, this.btn('Watch it', function () { self.saveWatch(); }, 'primary')];
 
     } else if (d.kind === 'sip') {
       a = d.data;

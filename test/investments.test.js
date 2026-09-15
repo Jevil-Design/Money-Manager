@@ -1432,6 +1432,302 @@ function withFundSearch(c, result) {
     ok('which is empty', v.tableEmpty === true);
   }
 
+  /* ----------------------------------------------------------- watchlist */
+
+  const PPFAS_REG = {
+    schemeCode: '122640', isin: 'INF879O01019', isinEffective: 'INF879O01019',
+    name: 'Parag Parikh Flexi Cap Fund', amc: 'PPFAS Mutual Fund',
+    plan: 'Regular Plan', option: 'Growth', nav: 81.6012, navDate: '2026-09-11'
+  };
+
+  function watchBook(opts) {
+    opts = opts || {};
+    const c = book();
+    c.api = function (url) {
+      if (url.indexOf('/funds/search') >= 0) {
+        return Promise.resolve({ funds: [PPFAS, PPFAS_REG], count: 2, catalogue: { stale: false } });
+      }
+      /* One scheme, for the price refresh. */
+      const m = url.match(/\/funds\/(\d+)$/);
+      if (m) {
+        if (opts.refresh === 'fail') return Promise.reject(new Error('provider down'));
+        if (opts.refresh === 'partial' && m[1] === '122640') return Promise.reject(new Error('down'));
+        /* A provider that answers, but with nothing usable in it. */
+        if (opts.refresh === 'zero') return Promise.resolve({ fund: { schemeCode: m[1], nav: 0, navDate: '' } });
+        if (opts.refresh === 'empty') return Promise.resolve({ fund: { schemeCode: m[1] } });
+        return Promise.resolve({ fund: { schemeCode: m[1], nav: 91.5, navDate: '2026-09-15' }, source: 'AMFI' });
+      }
+      return Promise.resolve({});
+    };
+    return c;
+  }
+
+  async function watch(c, fund) {
+    c.openWatch();
+    c.dlgSet({ fundQuery: 'parag' });
+    await c.watchFundSearch();
+    c.watchPickFund(fund || PPFAS);
+    c.saveWatch();
+    return c.state.db.watchlist[c.state.db.watchlist.length - 1];
+  }
+
+  console.log('\nThe watchlist collection reaches every book');
+  {
+    const c = book();
+    ok('a new book has one', Array.isArray(c.state.db.watchlist), typeof c.state.db.watchlist);
+    ok('and it starts empty', c.state.db.watchlist.length === 0);
+
+    /* An older book, saved before the watchlist existed, must gain one
+       without losing anything it already had. */
+    const migrated = c.migrate({
+      schemaVersion: 5, accounts: [{ id: 'a', name: 'Bank', type: 'bank' }],
+      txns: [{ id: 't', date: '2026-01-01', type: 'expense', amount: 100 }],
+      goals: [{ id: 'g', name: 'Kept', target: 1000, saved: 10 }],
+      investments: [{ id: 'i', name: 'Kept too', type: 'Lump Sum' }]
+    });
+    ok('an older book gains a watchlist', Array.isArray(migrated.watchlist),
+      typeof migrated.watchlist);
+    ok('empty, not invented', migrated.watchlist.length === 0);
+    ok('and nothing it had was lost',
+      migrated.accounts.length === 1 && migrated.txns.length === 1 &&
+      migrated.goals.length === 1 && migrated.investments.length === 1,
+      JSON.stringify({ a: migrated.accounts.length, t: migrated.txns.length,
+        g: migrated.goals.length, i: migrated.investments.length }));
+  }
+
+  console.log('\nWatching a scheme buys nothing');
+  {
+    const c = watchBook();
+    const w = await watch(c);
+
+    ok('it is on the watchlist', c.state.db.watchlist.length === 1);
+    ok('with its scheme code', w.schemeCode === '122639', w.schemeCode);
+    ok('its ISIN', w.isin === 'INF879O01027', w.isin);
+    ok('its plan, so Direct is not confused with Regular', w.plan === 'Direct Plan', w.plan);
+    ok('and its dated NAV', w.nav === 89.5712 && w.navDate === '2026-09-11',
+      w.nav + ' @ ' + w.navDate);
+
+    ok('no investment was created', c.state.db.investments.length === 0);
+    ok('no transaction was recorded', c.state.db.txns.length === 0);
+    ok('no account was created', c.state.db.accounts.length === 2, String(c.state.db.accounts.length));
+    ok('the bank is untouched', c.balances().bank.balance === 500000,
+      String(c.balances().bank.balance));
+    ok('and net worth has not moved', c.netWorth() === 500000, String(c.netWorth()));
+    ok('the portfolio is still empty', c.portfolio().rows.length === 0);
+    ok('so is its value', c.portfolio().totals.value === 0, String(c.portfolio().totals.value));
+  }
+
+  console.log('\nWhat the watchlist refuses');
+  {
+    const c = watchBook();
+    c.openWatch();
+    c.saveWatch();
+    ok('nothing is added without a scheme chosen', c.state.db.watchlist.length === 0);
+    ok('and the dialog stays open', !!c.state.dlg);
+
+    await watch(c);
+    c.openWatch();
+    c.dlgSet({ fundQuery: 'parag' });
+    await c.watchFundSearch();
+    c.watchPickFund(PPFAS);
+    c.saveWatch();
+    ok('the same scheme cannot be watched twice', c.state.db.watchlist.length === 1,
+      String(c.state.db.watchlist.length));
+
+    /* But its Regular twin is a different scheme and is allowed. */
+    c.watchPickFund(PPFAS_REG);
+    c.saveWatch();
+    ok('a different plan of the same fund is a different scheme',
+      c.state.db.watchlist.length === 2, String(c.state.db.watchlist.length));
+    ok('and they are told apart by code',
+      c.state.db.watchlist.map((x) => x.schemeCode).join(',') === '122639,122640',
+      c.state.db.watchlist.map((x) => x.schemeCode).join(','));
+  }
+
+  console.log('\nA failed search adds nothing');
+  {
+    const c = book();
+    c.api = () => Promise.reject(Object.assign(new Error('offline'), { status: 0 }));
+    c.openWatch();
+    c.dlgSet({ fundQuery: 'parag' });
+    await c.watchFundSearch();
+    ok('no schemes are produced', (c.state.dlg.data.fundResults || []).length === 0);
+    ok('the failure is explained', /could not reach/i.test(c.state.dlg.data.fundError),
+      c.state.dlg.data.fundError);
+    ok('and it says nothing was added', /nothing has been added/i.test(c.state.dlg.data.fundError),
+      c.state.dlg.data.fundError);
+    c.saveWatch();
+    ok('saving after a failed search still adds nothing', c.state.db.watchlist.length === 0);
+  }
+
+  console.log('\nRefreshing prices');
+  {
+    const c = watchBook();
+    await watch(c);
+    ok('the price starts at the one the search gave', c.state.db.watchlist[0].nav === 89.5712);
+
+    await c.refreshWatch();
+    ok('the price is updated', c.state.db.watchlist[0].nav === 91.5,
+      String(c.state.db.watchlist[0].nav));
+    ok('and so is its date', c.state.db.watchlist[0].navDate === '2026-09-15',
+      c.state.db.watchlist[0].navDate);
+    ok('the refresh is no longer running', c.state.watchBusy === false);
+    ok('and still nothing was bought', c.state.db.txns.length === 0);
+  }
+
+  console.log('\nA failed refresh keeps the price it had, rather than blanking it');
+  {
+    const c = watchBook({ refresh: 'fail' });
+    await watch(c);
+    const before = c.state.db.watchlist[0].nav;
+    await c.refreshWatch();
+    ok('the old price survives', c.state.db.watchlist[0].nav === before,
+      String(c.state.db.watchlist[0].nav));
+    ok('it is not zeroed', c.state.db.watchlist[0].nav > 0);
+    ok('and the date is not moved forward to imply it is fresh',
+      c.state.db.watchlist[0].navDate === '2026-09-11', c.state.db.watchlist[0].navDate);
+
+    /* A reply that arrives but carries no usable price is not a price. This
+       is the failure that looks like a success, so it is the one most likely
+       to write a zero over a real number. */
+    for (const mode of ['zero', 'empty']) {
+      const z = watchBook({ refresh: mode });
+      await watch(z);
+      await z.refreshWatch();
+      ok('a "' + mode + '" reply does not overwrite the real price',
+        z.state.db.watchlist[0].nav === 89.5712, String(z.state.db.watchlist[0].nav));
+      ok('and does not clear its date', z.state.db.watchlist[0].navDate === '2026-09-11',
+        z.state.db.watchlist[0].navDate);
+    }
+
+    /* Some succeed, some do not. */
+    const c2 = watchBook({ refresh: 'partial' });
+    await watch(c2, PPFAS);
+    await watch(c2, PPFAS_REG);
+    await c2.refreshWatch();
+    const byCode = {};
+    c2.state.db.watchlist.forEach((w) => { byCode[w.schemeCode] = w; });
+    ok('the one that answered is updated', byCode['122639'].nav === 91.5,
+      String(byCode['122639'].nav));
+    ok('the one that did not keeps its own price', byCode['122640'].nav === 81.6012,
+      String(byCode['122640'].nav));
+  }
+
+  console.log('\nMoving a watched scheme into the portfolio');
+  {
+    const c = watchBook();
+    const w = await watch(c);
+    c.investFromWatch(w);
+
+    ok('the Add investment dialog opens', c.state.dlg && c.state.dlg.kind === 'investment');
+    const d = c.state.dlg.data;
+    ok('already identified', d.schemeCode === '122639', d.schemeCode);
+    ok('with the ISIN', d.isin === 'INF879O01027', d.isin);
+    ok('the plan', d.plan === 'Direct Plan', d.plan);
+    ok('and the price to buy at', d.buyNav === 89.5712, String(d.buyNav));
+    ok('nothing has been bought yet', c.state.db.investments.length === 0);
+
+    /* Finish the purchase: it is the ordinary flow, with the ordinary rules. */
+    c.dlgSet({ buyDate: '2026-09-15', buyAmount: 50000 });
+    c.saveInvestment();
+    ok('now it is a holding', c.state.db.investments.length === 1);
+    ok('the ledger entry is a transfer',
+      c.state.db.txns.length === 1 && c.state.db.txns[0].type === 'transfer');
+    ok('nothing became an expense',
+      c.state.db.txns.filter((t) => t.type === 'expense').length === 0);
+    ok('the watchlist entry is left alone — removing it is the user’s call',
+      c.state.db.watchlist.length === 1);
+  }
+
+  console.log('\nRemoving from the watchlist');
+  {
+    const c = watchBook();
+    const w = await watch(c);
+    c.removeWatch(w);
+    ok('it is gone', c.state.db.watchlist.length === 0);
+    ok('with no confirmation needed, because nothing of value is lost',
+      !c.state.confirm);
+  }
+
+  console.log('\nThe watchlist screen renders');
+  {
+    const c = watchBook();
+    c.state.tab = 'Investments';
+    c.setState({ invView: 'watch' });
+
+    let v = c.investVals(c.balances());
+    ok('the view is reachable', v.tableTitle === 'Watchlist', v.tableTitle);
+    ok('it renders when empty', v.tableEmpty === true);
+    ok('with a dash for the oldest price, not a date', v.panels[1].value === '—',
+      v.panels[1].value);
+    ok('and says none are held', /none of these are in your portfolio/.test(v.panels[2].note),
+      v.panels[2].note);
+
+    await watch(c);
+    v = c.investVals(c.balances());
+    ok('the scheme appears as a row', v.tableRows.length === 1, String(v.tableRows.length));
+    ok('with a cell for every column',
+      v.tableRows[0].cells.length === v.tableCols.length,
+      v.tableRows[0].cells.length + ' vs ' + v.tableCols.length);
+    ok('showing the NAV', /89\.57/.test(v.tableRows[0].cells[3].text), v.tableRows[0].cells[3].text);
+    ok('and the day it is from', /11-09-2026/.test(v.tableRows[0].cells[4].text),
+      v.tableRows[0].cells[4].text);
+    ok('the heading says it counts towards nothing',
+      /none of it is yours/.test(v.tableSub), v.tableSub);
+    ok('and so does the note',
+      /kept out of the portfolio, net worth and every return/.test(v.tableNote), v.tableNote);
+    ok('no panel shows NaN or undefined',
+      v.panels.every((p) => !/NaN|undefined|Infinity/.test(String(p.value) + String(p.note))),
+      JSON.stringify(v.panels.map((p) => p.value)));
+    ok('nor any cell',
+      v.tableRows[0].cells.every((x) => !/NaN|undefined|Infinity/.test(String(x.text || ''))),
+      JSON.stringify(v.tableRows[0].cells.map((x) => x.text)));
+
+    /* A stale price is flagged rather than passed off as current. */
+    c.mutate((db) => { db.watchlist[0].navDate = '2026-08-01'; });
+    v = c.investVals(c.balances());
+    ok('a price more than a week old is flagged',
+      v.tableRows[0].cells[4].style.indexOf('b3701c') >= 0, v.tableRows[0].cells[4].style);
+    ok('and the panel says how old it is', /45 days old/.test(v.panels[1].note),
+      v.panels[1].note);
+
+    /* Owning it is noticed. */
+    c.mutate((db) => {
+      db.investments.push({ id: 'x', name: 'Owned', type: 'Lump Sum', accountId: 'mf',
+        schemeCode: '122639', currentNav: 90, status: 'active', createdAt: 1, updatedAt: 1 });
+    });
+    v = c.investVals(c.balances());
+    ok('a watched scheme already held is counted', v.panels[2].value === '1', v.panels[2].value);
+
+    /* And the view switcher reaches all four. */
+    ok('there are four views', v.tableTools.filter((b) =>
+      ['Holdings', 'SIPs', 'Goals', 'Watchlist'].indexOf(b.label) >= 0).length === 4,
+      JSON.stringify(v.tableTools.map((b) => b.label)));
+  }
+
+  console.log('\nThe watchlist dialog renders');
+  {
+    const c = watchBook();
+    c.openWatch();
+    ok('it opens', c.state.dlg.kind === 'watch');
+    ok('and renders', !!c.dlgVals().hasDlg);
+
+    c.dlgSet({ fundQuery: 'parag' });
+    await c.watchFundSearch();
+    const withResults = c.dlgVals();
+    ok('the results are listed to choose from', withResults.dlgTableRows.length === 2,
+      String(withResults.dlgTableRows.length));
+    ok('each with a Use action',
+      JSON.stringify(withResults.dlgTableRows).indexOf('Use') >= 0);
+
+    c.watchPickFund(PPFAS);
+    const picked = c.dlgVals();
+    ok('the chosen scheme is shown back', JSON.stringify(picked.dlgFields).indexOf('122639') >= 0);
+    ok('with its NAV dated', JSON.stringify(picked.dlgFields).indexOf('as of') >= 0);
+    ok('and the dialog says watching buys nothing',
+      /buys nothing/.test(picked.dlgNote || JSON.stringify(picked)), picked.dlgNote);
+  }
+
   console.log('\n' + (fails ? fails + ' FAILURE(S)' : 'all checks passed'));
   process.exit(fails ? 1 : 0);
 })().catch((e) => { console.error(e); process.exit(1); });

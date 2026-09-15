@@ -1782,7 +1782,7 @@ function startingDocument(withSamples) {
     recons: [], views: [], loanEvents: [],
     /* Investments: empty for a new account, but present, so the app does not
        have to migrate a brand-new document just to add three arrays. */
-    investments: [], invTxns: [], sips: [],
+    investments: [], invTxns: [], sips: [], watchlist: [],
     tags: ['#office', '#travel', '#family', '#salary', '#reimbursable'],
     payments: MM_PAY.slice(),
     settings: {
