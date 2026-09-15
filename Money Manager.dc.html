@@ -6134,6 +6134,411 @@ class Component extends DCLogic {
     });
   }
 
+  /* =========================================================================
+     INVESTMENTS
+
+     The portfolio, built entirely from portfolio() so this screen cannot
+     disagree with the dashboard or with an investment's own page.
+     ========================================================================= */
+
+  /* Where a holding of this kind should sit. One account per group rather
+     than per investment, so the Accounts screen does not fill up with a row
+     for every fund. */
+  invAccountFor(type) {
+    var group = mmInvGroupOf(type);
+    var want = group === 'deposit' ? 'fd' : group === 'gold' ? 'gold' : 'investment';
+    var named = { mf: 'Mutual Funds', deposit: 'Fixed Deposits', gold: 'Gold',
+      market: 'Shares & ETFs', longterm: 'Long-term Savings', other: 'Investments' };
+    var existing = this.state.db.accounts.filter(function (a) {
+      return a.type === want && !a.archived;
+    })[0];
+    return { account: existing || null, type: want, suggestedName: named[group] || 'Investments' };
+  }
+
+  /* Money put in this month, and the next thing to mature. */
+  invMonthAndMaturity() {
+    var self = this;
+    return this.cache('invsum', function () {
+      var today = mmIso(new Date());
+      var monthStart = today.slice(0, 8) + '01';
+      var thisMonth = 0;
+      (self.state.db.invTxns || []).forEach(function (t) {
+        if (!mmInvIsInflow(t.type)) return;
+        if (String(t.date) < monthStart || String(t.date) > today) return;
+        var a = Math.abs(+t.amount || 0);
+        if (isFinite(a)) thisMonth += a;
+      });
+      var monthlySip = 0, activeSips = 0;
+      (self.state.db.sips || []).forEach(function (s) {
+        if (s.status !== 'active') return;
+        var a = Math.abs(+s.amount || 0);
+        if (!isFinite(a)) return;
+        activeSips++;
+        /* Normalised to a month so one figure covers every frequency. */
+        var per = { monthly: 1, quarterly: 1 / 3, weekly: 4.33, yearly: 1 / 12 }[s.freq || 'monthly'] || 1;
+        monthlySip += a * per;
+      });
+      var next = null;
+      (self.state.db.investments || []).forEach(function (inv) {
+        if (inv.status === 'closed' || inv.status === 'sold') return;
+        var d = String(inv.maturityDate || '');
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(d) || d < today) return;
+        if (!next || d < next.date) next = { date: d, name: inv.name, value: self.invState(inv).value };
+      });
+      return {
+        thisMonth: thisMonth, monthlySip: Math.round(monthlySip), activeSips: activeSips,
+        nextMaturity: next
+      };
+    });
+  }
+
+  investVals() {
+    var self = this;
+    var p = this.portfolio();
+    var extra = this.invMonthAndMaturity();
+    var t = p.totals;
+
+    var rows = p.rows.map(function (r) {
+      var inv = r.inv, st = r.st;
+      var gainColour = st.gain > 0 ? 'var(--c-1a6b3c)' : st.gain < 0 ? 'var(--c-a3241f)' : 'var(--c-4a5b6b)';
+      /* An unavailable XIRR is a dash, never a zero — zero is a real rate and
+         would read as "this earned nothing". */
+      var xirr = st.xirr === null ? '—' : st.xirr.toFixed(2) + '%';
+      return {
+        key: inv.id,
+        go: function () { self.openInvestment('edit', inv); },
+        style: self.rowStyle(0, false),
+        cells: [
+          self.tcell(inv.name || '(unnamed)', '200px', 'left', { bold: true }),
+          self.tcell(inv.type || '', '150px'),
+          self.tcell(mmInr(st.invested), '120px', 'right'),
+          self.tcell(mmInr(st.value), '120px', 'right'),
+          self.tcell(mmInr(st.gain), '120px', 'right', { color: gainColour }),
+          self.tcell(st.invested > 0 ? st.returnPct.toFixed(2) + '%' : '—', '92px', 'right', { color: gainColour }),
+          self.tcell(xirr, '92px', 'right'),
+          self.tcell(inv.status || 'active', '84px'),
+          self.tacts([
+            { label: 'Add money…', go: function (e) { e.stopPropagation(); self.openInvTxn(inv, 'buy'); } },
+            { label: 'Withdraw…', go: function (e) { e.stopPropagation(); self.openInvTxn(inv, 'withdrawal'); } },
+            { label: 'Edit', go: function (e) { e.stopPropagation(); self.openInvestment('edit', inv); } }
+          ], '250px')
+        ]
+      };
+    });
+
+    var gainColour = t.gain > 0 ? 'var(--c-1a6b3c)' : t.gain < 0 ? 'var(--c-a3241f)' : 'var(--c-14416e)';
+    var panels = [
+      this.panel({ label: 'Total invested', value: mmInr(t.invested) }),
+      this.panel({ label: 'Current value', value: mmInr(t.value), color: 'var(--c-14416e)' }),
+      this.panel({ label: 'Gain / loss', value: mmInr(t.gain), color: gainColour }),
+      this.panel({
+        label: 'Overall return',
+        value: t.invested > 0 ? t.returnPct.toFixed(2) + '%' : '—',
+        color: gainColour
+      }),
+      this.panel({
+        label: 'XIRR',
+        value: t.xirr === null ? '—' : t.xirr.toFixed(2) + '%',
+        note: t.xirr === null ? 'needs dated buys and a value' : 'annualised, by actual dates'
+      }),
+      this.panel({
+        label: 'Monthly SIP', value: mmInr(extra.monthlySip),
+        note: extra.activeSips + ' active'
+      }),
+      this.panel({ label: 'Invested this month', value: mmInr(extra.thisMonth) }),
+      this.panel({
+        label: 'Next maturity',
+        value: extra.nextMaturity ? mmNiceDate(extra.nextMaturity.date) : '—',
+        note: extra.nextMaturity
+          ? extra.nextMaturity.name + ' · ' + mmInr(extra.nextMaturity.value)
+          : 'nothing dated'
+      })
+    ];
+
+    return {
+      isTable: true,
+      tableTitle: 'Investments',
+      tableSub: p.rows.length
+        ? p.rows.length + ' holding' + (p.rows.length === 1 ? '' : 's') +
+          ' · buying moves money between your own accounts, so it is never counted as spending'
+        : 'no investments yet',
+      tableTools: [
+        this.btn('+ Add investment', function () { self.openInvestment('add', {}); }, 'primary')
+      ],
+      tableCols: [
+        this.tcol('Investment', '200px'), this.tcol('Type', '150px'),
+        this.tcol('Invested', '120px', 'right'), this.tcol('Current value', '120px', 'right'),
+        this.tcol('Gain / loss', '120px', 'right'), this.tcol('Return', '92px', 'right'),
+        this.tcol('XIRR', '92px', 'right'), this.tcol('Status', '84px'),
+        this.tcol('Actions', '250px', 'right')
+      ],
+      tableRows: rows, tableEmpty: rows.length === 0,
+      emptyMsg: 'Nothing invested yet. Add a mutual fund, deposit or anything else you hold.',
+      emptyBtn: '+ Add investment',
+      emptyGo: function () { self.openInvestment('add', {}); },
+      hasPanels: true, hasBars: false, hasFoot: false,
+      panels: panels,
+      hasTableNote: true,
+      tableNote: 'Values come from the latest NAV where a fund is linked, and from what you enter otherwise. ' +
+        'NAV is published once a working day, so it is dated rather than live.'
+    };
+  }
+
+  /* ---- adding and editing a holding ------------------------------------ */
+
+  openInvestment(mode, preset) {
+    var today = mmIso(new Date());
+    var cash = this.state.db.accounts.filter(function (a) {
+      return !a.archived && (a.type === 'bank' || a.type === 'cash' || a.type === 'wallet');
+    })[0];
+    var base = mode === 'edit' ? mmClone(preset) : {
+      id: '', name: '', type: 'Lump Sum', institution: '', folio: '',
+      schemeCode: '', isin: '', amc: '', plan: '', option: '', fundName: '',
+      currentNav: 0, navDate: '', currentValue: 0, accountId: '',
+      maturityDate: '', rate: 0, status: 'active', notes: '',
+      /* Only used while adding: the opening purchase. */
+      payFrom: cash ? cash.id : '', buyDate: today, buyAmount: 0, buyUnits: 0, buyNav: 0,
+      fundQuery: '', fundResults: null, fundBusy: false, fundError: ''
+    };
+    this.setState({ dlg: { kind: 'investment', mode: mode || 'add', data: base } });
+  }
+
+  /* Look schemes up through the server, which owns the provider. Nothing
+     about the data source reaches this screen. */
+  invFundSearch() {
+    var self = this;
+    var d = this.state.dlg;
+    if (!d || d.kind !== 'investment') return Promise.resolve();
+    var q = String(d.data.fundQuery || '').trim();
+    if (q.length < 2) {
+      this.dlgSet({ fundError: 'Type at least two characters.' });
+      return Promise.resolve();
+    }
+    this.dlgSet({ fundBusy: true, fundError: '', fundResults: null });
+    /* Returned so a caller can wait for it — the dialog does not, but the
+       tests do, and nothing should have to guess when a search has landed. */
+    return this.api('/api/v1/funds/search?q=' + encodeURIComponent(q) + '&limit=25')
+      .then(function (r) {
+        var list = (r && r.funds) || [];
+        self.dlgSet({
+          fundBusy: false,
+          fundResults: list,
+          /* A stale catalogue is said plainly rather than passed off as current. */
+          fundError: list.length ? (r.catalogue && r.catalogue.stale
+            ? 'Showing the last downloaded fund list — it could not be refreshed just now.' : '')
+            : 'No scheme matched “' + q + '”.'
+        });
+      })
+      .catch(function (e) {
+        /* Never invent a fund or a price when the lookup fails. */
+        self.dlgSet({
+          fundBusy: false, fundResults: [],
+          fundError: e && e.status === 0
+            ? 'Could not reach the server to look that up. Nothing has been changed.'
+            : (e.message || 'That search could not be completed.')
+        });
+      });
+  }
+
+  /* Take a scheme from the results. Everything identifying it is stored, so a
+     Direct plan can never be confused with its Regular twin later. */
+  invPickFund(f) {
+    var d = this.state.dlg;
+    var name = (d && d.data.name) || '';
+    this.dlgSet({
+      schemeCode: f.schemeCode, isin: f.isinEffective || f.isin || '',
+      amc: f.amc || '', plan: f.plan || '', option: f.option || '',
+      fundName: f.name || '',
+      name: name || (f.name + (f.plan ? ' — ' + f.plan : '')),
+      currentNav: f.nav || 0, navDate: f.navDate || '',
+      /* The NAV it is worth today is also the best guess at what it cost, but
+         only until a real purchase price is entered. */
+      buyNav: (d && +d.data.buyNav) > 0 ? d.data.buyNav : (f.nav || 0),
+      fundResults: null, fundError: ''
+    });
+  }
+
+  saveInvestment() {
+    var self = this;
+    var d = this.state.dlg, a = Object.assign({}, d.data);
+    var name = String(a.name || '').trim();
+    if (!name) { this.flash('Give the investment a name.'); return; }
+    if (MM_INV_TYPE_GROUP[a.type] === undefined && a.type !== 'Other Investment') {
+      /* Unknown types are allowed — the brief asks for custom kinds — but an
+         empty one is a mistake. */
+      if (!String(a.type || '').trim()) { this.flash('Choose what kind of investment this is.'); return; }
+    }
+    a.name = name;
+    a.currentNav = Math.max(0, parseFloat(a.currentNav) || 0);
+    a.currentValue = Math.max(0, parseFloat(a.currentValue) || 0);
+    a.rate = Math.max(0, parseFloat(a.rate) || 0);
+    if (a.maturityDate && !/^\d{4}-\d{2}-\d{2}$/.test(a.maturityDate)) {
+      this.flash('That maturity date is not a date.'); return;
+    }
+
+    var buyAmount = Math.abs(parseFloat(a.buyAmount) || 0);
+    var buyUnits = Math.abs(parseFloat(a.buyUnits) || 0);
+    var buyNav = Math.abs(parseFloat(a.buyNav) || 0);
+    var isAdd = d.mode !== 'edit';
+
+    if (isAdd && buyAmount > 0) {
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(a.buyDate)) { this.flash('Choose the date you invested.'); return; }
+      if (!a.payFrom || !this.acct(a.payFrom)) {
+        this.flash('Choose the account the money came from.'); return;
+      }
+      /* Units follow from the price when they were not typed — the brief is
+         explicit that nobody should have to divide by hand. */
+      if (!buyUnits && buyNav > 0 && mmInvIsUnitised(a.type)) {
+        buyUnits = Math.round((buyAmount / buyNav) * 10000) / 10000;
+      }
+    }
+
+    /* Strip the fields that only exist while the dialog is open. */
+    ['payFrom', 'buyDate', 'buyAmount', 'buyUnits', 'buyNav',
+      'fundQuery', 'fundResults', 'fundBusy', 'fundError'].forEach(function (k) { delete a[k]; });
+
+    var holder = this.invAccountFor(a.type);
+    var payFrom = d.data.payFrom, buyDate = d.data.buyDate;
+
+    this.pushUndo(isAdd ? 'adding ' + name : 'editing ' + name, ['investments', 'invTxns', 'accounts', 'txns']);
+    this.mutate(function (db) {
+      /* The account that holds it. Created on demand so adding a first
+         investment is not blocked by a separate housekeeping step. */
+      var accId = a.accountId;
+      if (!accId || !db.accounts.some(function (x) { return x.id === accId; })) {
+        var found = holder.account;
+        if (found) accId = found.id;
+        else {
+          var na = {
+            id: mmUid(), name: holder.suggestedName, type: holder.type, opening: 0,
+            currency: 'INR', color: '#2b5f96', institution: '', number: '', notes: '',
+            archived: false, demo: false, createdAt: Date.now(), updatedAt: Date.now()
+          };
+          db.accounts.push(na);
+          accId = na.id;
+        }
+      }
+      a.accountId = accId;
+      a.updatedAt = Date.now();
+
+      if (!isAdd) {
+        db.investments.forEach(function (x, i) {
+          if (x.id === a.id) db.investments[i] = Object.assign({}, x, a);
+        });
+        return;
+      }
+
+      a.id = mmUid();
+      a.createdAt = Date.now();
+      a.demo = false;
+      db.investments.push(a);
+
+      if (buyAmount > 0) {
+        /* The holding's own record of the purchase... */
+        db.invTxns.push({
+          id: mmUid(), investmentId: a.id, date: buyDate,
+          type: mmInvIsUnitised(a.type) ? 'buy' : 'lumpsum',
+          amount: buyAmount, units: buyUnits, nav: buyNav,
+          accountId: payFrom, notes: '', createdAt: Date.now(), updatedAt: Date.now()
+        });
+        /* ...and the ledger's, which is a TRANSFER. This is the whole of the
+           accounting integration: money moves between two accounts you own,
+           so the bank falls, the holding rises, and nothing is recorded as
+           spending. */
+        db.txns.push({
+          id: mmUid(), date: buyDate, type: 'transfer',
+          accountId: payFrom, toAccountId: accId,
+          categoryId: '', sub: '', amount: buyAmount,
+          contents: 'Invested in ' + name, details: a.fundName || a.type,
+          payment: 'Bank Transfer', notes: '', tags: [], attachment: null,
+          ref: '', reconciled: false, reimb: false, reimbWho: '', reimbStatus: '',
+          importId: '', demo: false, createdAt: Date.now(), updatedAt: Date.now()
+        });
+      }
+    }, isAdd
+      ? (buyAmount > 0
+        ? name + ' added, and ' + mmInr(buyAmount) + ' moved out of ' + this.acctName(payFrom) + '.'
+        : name + ' added.')
+      : 'Investment updated.');
+    this.setState({ dlg: null });
+  }
+
+  /* Putting more in, or taking some out, after the fact. */
+  openInvTxn(inv, kind) {
+    if (!inv) return;
+    var cash = this.state.db.accounts.filter(function (a) {
+      return !a.archived && (a.type === 'bank' || a.type === 'cash' || a.type === 'wallet');
+    })[0];
+    this.setState({
+      dlg: {
+        kind: 'invtxn', mode: 'add',
+        data: {
+          investmentId: inv.id, name: inv.name, unitised: mmInvIsUnitised(inv.type),
+          type: kind || 'buy', date: mmIso(new Date()), amount: 0, units: 0,
+          nav: +inv.currentNav || 0, accountId: cash ? cash.id : '', notes: ''
+        }
+      }
+    });
+  }
+
+  saveInvTxn() {
+    var self = this;
+    var d = this.state.dlg, t = Object.assign({}, d.data);
+    var inv = this.inv(t.investmentId);
+    if (!inv) { this.flash('That investment is no longer there.'); return; }
+    var amount = Math.abs(parseFloat(t.amount) || 0);
+    if (!(amount > 0)) { this.flash('Enter an amount.'); return; }
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(t.date)) { this.flash('Choose a date.'); return; }
+    if (MM_INV_TXN_TYPES.indexOf(t.type) < 0) { this.flash('Choose what kind of transaction this is.'); return; }
+    if (!t.accountId || !this.acct(t.accountId)) {
+      this.flash(mmInvIsInflow(t.type) ? 'Choose the account the money came from.'
+        : 'Choose the account the money goes to.'); return;
+    }
+    var units = Math.abs(parseFloat(t.units) || 0);
+    var nav = Math.abs(parseFloat(t.nav) || 0);
+    if (!units && nav > 0 && mmInvIsUnitised(inv.type)) {
+      units = Math.round((amount / nav) * 10000) / 10000;
+    }
+    /* You cannot sell more than you hold. */
+    if (mmInvReducesUnits(t.type) && mmInvIsUnitised(inv.type) && units > 0) {
+      var held = this.invUnits(inv.id);
+      if (units > held + 0.0001) {
+        this.flash('That is more units than this holding has (' + held + ').');
+        return;
+      }
+    }
+
+    var inflow = mmInvIsInflow(t.type);
+    var holding = inv.accountId;
+    this.pushUndo('recording ' + (MM_INV_TXN_LABEL[t.type] || t.type) + ' on ' + inv.name,
+      ['invTxns', 'txns']);
+    this.mutate(function (db) {
+      db.invTxns.push({
+        id: mmUid(), investmentId: inv.id, date: t.date, type: t.type,
+        amount: amount, units: units, nav: nav, accountId: t.accountId,
+        notes: String(t.notes || ''), createdAt: Date.now(), updatedAt: Date.now()
+      });
+      if (holding && db.accounts.some(function (x) { return x.id === holding; })) {
+        /* Both directions are transfers between accounts you own. A dividend
+           paid out in cash is money leaving the holding and arriving in the
+           bank — still not income, because the gain was already counted in
+           the holding's value. */
+        db.txns.push({
+          id: mmUid(), date: t.date, type: 'transfer',
+          accountId: inflow ? t.accountId : holding,
+          toAccountId: inflow ? holding : t.accountId,
+          categoryId: '', sub: '', amount: amount,
+          contents: (MM_INV_TXN_LABEL[t.type] || t.type) + ' — ' + inv.name,
+          details: inv.fundName || inv.type, payment: 'Bank Transfer',
+          notes: String(t.notes || ''), tags: [], attachment: null, ref: '',
+          reconciled: false, reimb: false, reimbWho: '', reimbStatus: '',
+          importId: '', demo: false, createdAt: Date.now(), updatedAt: Date.now()
+        });
+      }
+    }, (MM_INV_TXN_LABEL[t.type] || 'Transaction') + ' of ' + mmInr(amount) + ' recorded.');
+    this.setState({ dlg: null });
+  }
+
   loanVals() {
     var self = this, db = this.state.db;
     var totOut = 0, totPaidP = 0, totPaidI = 0, totEmi = 0;
@@ -7839,7 +8244,7 @@ class Component extends DCLogic {
     else if (tab === 'Recurring') v = this.recurVals();
     else if (tab === 'Cards') v = this.cardVals(bal);
     else if (tab === 'Loans') v = this.loanVals();
-    else if (tab === 'Goals') v = this.goalVals(bal);
+    else if (tab === 'Investments') v = this.investVals(bal);
     else if (tab === 'Reports') v = this.reportVals(base, bal);
     else if (tab === 'Reconcile') v = this.reconVals(bal);
     else if (tab === 'Calendar') v = this.calVals();
@@ -9303,6 +9708,139 @@ class Component extends DCLogic {
         this.btn('Take the other version', function () { self.conflictTakeServer(); }),
         this.btn('Keep mine and replace it', function () { self.conflictKeepMine(); }, 'primary')
       ];
+    } else if (d.kind === 'investment') {
+      a = d.data;
+      var isMf = mmInvGroupOf(a.type) === 'mf';
+      var unitised = mmInvIsUnitised(a.type);
+      title = (d.mode === 'edit' ? 'Edit investment' : 'Add investment');
+      width = 620;
+
+      var typeOptions = [];
+      MM_INV_GROUPS.forEach(function (g) {
+        g.types.forEach(function (t) { typeOptions.push({ v: t, l: g.label + ' — ' + t }); });
+      });
+      fields.push(this.fld('Name', 'text', a.name, set('name'),
+        { focus: d.mode !== 'edit', hint: 'what you call this holding' }));
+      fields.push(this.fld('Kind', 'select', a.type, set('type'), { options: typeOptions }));
+
+      if (isMf) {
+        /* Fund discovery. The scheme is chosen from real data, so the plan
+           and option cannot be mistyped and the NAV is not invented. */
+        fields.push(this.fld('Find the fund', 'text', a.fundQuery, set('fundQuery'), {
+          hint: 'name, AMC, scheme code or ISIN — then press Search'
+        }));
+        fields.push(this.fld('', 'buttons', '', null, {
+          buttons: [
+            this.btn(a.fundBusy ? 'Searching…' : 'Search funds',
+              function () { self.invFundSearch(); }, 'primary')
+          ]
+        }));
+        if (a.schemeCode) {
+          fields.push(this.fld('Scheme', 'static',
+            a.fundName + '\n' + (a.amc || '') +
+            '\n' + [a.plan, a.option].filter(Boolean).join(' · ') +
+            '\nCode ' + a.schemeCode + (a.isin ? '  ·  ISIN ' + a.isin : ''),
+            null, { wrap: true }));
+          fields.push(this.fld('Latest NAV', 'static',
+            (+a.currentNav > 0 ? mmInr(a.currentNav) : 'not available'),
+            null, {
+              hint: a.navDate
+                ? 'as of ' + mmNiceDate(a.navDate) + ' — NAV is published once a working day, not live'
+                : 'no NAV date, so this value is not dated'
+            }));
+        }
+        if (a.fundError) {
+          fields.push(this.fld('', 'static', a.fundError, null,
+            { wrap: true, color: 'var(--c-8c2a24)' }));
+        }
+        if (a.fundResults && a.fundResults.length) {
+          tCols = [this.tcol('Scheme', '250px'), this.tcol('Plan / option', '175px'),
+            this.tcol('NAV', '95px', 'right'), this.tcol('As of', '92px'), this.tcol('', '70px', 'right')];
+          tRows = a.fundResults.map(function (f) {
+            return {
+              key: f.schemeCode, style: self.rowStyle(0, false), go: function () { self.invPickFund(f); },
+              cells: [
+                self.tcell(f.name, '250px'),
+                self.tcell([f.plan, f.option].filter(Boolean).join(' · '), '175px'),
+                self.tcell(f.nav ? mmInr(f.nav) : '—', '95px', 'right'),
+                self.tcell(f.navDate ? mmNiceDate(f.navDate) : '—', '92px'),
+                self.tacts([{ label: 'Use', go: function (e) { e.stopPropagation(); self.invPickFund(f); } }], '70px')
+              ]
+            };
+          });
+        }
+      }
+
+      fields.push(this.fld('Institution', 'text', a.institution, set('institution'),
+        { hint: 'bank, AMC or broker' }));
+      fields.push(this.fld('Folio / account no.', 'text', a.folio, set('folio'), { hint: 'optional' }));
+
+      if (!unitised) {
+        fields.push(this.fld('Current value', 'text', a.currentValue, set('currentValue'),
+          { type: 'number', hint: 'what it is worth today — nothing is guessed for you' }));
+        fields.push(this.fld('Interest rate %', 'text', a.rate, set('rate'), { type: 'number', hint: 'optional' }));
+        fields.push(this.fld('Maturity date', 'text', a.maturityDate, set('maturityDate'),
+          { type: 'date', hint: 'optional — drives the maturity tracker' }));
+      } else if (!isMf) {
+        fields.push(this.fld('Current price', 'text', a.currentNav, set('currentNav'),
+          { type: 'number', hint: 'per unit, gram or share' }));
+      }
+
+      if (d.mode !== 'edit') {
+        fields.push(this.fld('', 'static',
+          'The opening purchase. Money moves from the account you choose into this holding — a transfer between your own accounts, never an expense.',
+          null, { wrap: true }));
+        fields.push(this.fld('Invested on', 'text', a.buyDate, set('buyDate'), { type: 'date' }));
+        fields.push(this.fld('Amount', 'text', a.buyAmount, set('buyAmount'),
+          { type: 'number', hint: 'leave at 0 to record the holding without any money movement' }));
+        if (unitised) {
+          fields.push(this.fld('Price paid', 'text', a.buyNav, set('buyNav'),
+            { type: 'number', hint: 'NAV or price per unit' }));
+          fields.push(this.fld('Units', 'text', a.buyUnits, set('buyUnits'),
+            { type: 'number', hint: 'left blank, this is worked out as amount ÷ price' }));
+        }
+        fields.push(this.fld('Paid from', 'select', a.payFrom, set('payFrom'),
+          { options: this.acctOptions() }));
+        var holder = this.invAccountFor(a.type);
+        fields.push(this.fld('Held in', 'static',
+          holder.account ? holder.account.name : holder.suggestedName + '  (will be created)',
+          null, { hint: 'the account that carries what this cost' }));
+      }
+
+      fields.push(this.fld('Status', 'select', a.status, set('status'), {
+        options: [{ v: 'active', l: 'Active' }, { v: 'matured', l: 'Matured' },
+          { v: 'sold', l: 'Sold' }, { v: 'closed', l: 'Closed' }]
+      }));
+      fields.push(this.fld('Notes', 'area', a.notes, set('notes'), { hint: 'Optional' }));
+
+      note = 'What a holding is worth is kept apart from what it cost. The account carries the cost, ' +
+        'so your books stay right; the current value is what makes net worth reflect the market.';
+      buttons = [cancel, this.btn(d.mode === 'edit' ? 'Save' : 'Add investment',
+        function () { self.saveInvestment(); }, 'primary')];
+
+    } else if (d.kind === 'invtxn') {
+      a = d.data;
+      title = 'Record a transaction';
+      width = 480;
+      fields.push(this.fld('Investment', 'static', a.name, null, {}));
+      fields.push(this.fld('What happened', 'select', a.type, set('type'), {
+        options: MM_INV_TXN_TYPES.map(function (k) { return { v: k, l: MM_INV_TXN_LABEL[k] || k }; })
+      }));
+      fields.push(this.fld('Date', 'text', a.date, set('date'), { type: 'date' }));
+      fields.push(this.fld('Amount', 'text', a.amount, set('amount'), { type: 'number', focus: true }));
+      if (a.unitised) {
+        fields.push(this.fld('Price / NAV', 'text', a.nav, set('nav'), { type: 'number', hint: 'per unit' }));
+        fields.push(this.fld('Units', 'text', a.units, set('units'),
+          { type: 'number', hint: 'left blank, this is worked out as amount ÷ price' }));
+      }
+      fields.push(this.fld(mmInvIsInflow(a.type) ? 'Paid from' : 'Paid into', 'select',
+        a.accountId, set('accountId'), { options: this.acctOptions() }));
+      fields.push(this.fld('Notes', 'text', a.notes, set('notes'), { hint: 'Optional' }));
+      note = mmInvIsInflow(a.type)
+        ? 'Money moves out of the account you choose and into the holding. It is a transfer, so it is not counted as spending.'
+        : 'Money moves out of the holding and into the account you choose. It is a transfer, so it is not counted as income.';
+      buttons = [cancel, this.btn('Record', function () { self.saveInvTxn(); }, 'primary')];
+
     } else if (d.kind === 'localdata') {
       /* Data left in this browser by the local-only version.  Nothing here
          deletes it: the choices are copy it up, leave it alone, or decide

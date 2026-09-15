@@ -38,9 +38,10 @@ class StubLogic {
   setState(patch, cb) { Object.assign(this.state, typeof patch === 'function' ? patch(this.state) : patch); if (cb) cb(); }
   forceUpdate() {}
 }
-const { Component, MM_TABS, MM_TAB_ALIAS, mmInvGroupOf, mmInvIsUnitised, mmInvIsInflow } =
+const { Component, MM_TABS, MM_TAB_ALIAS, mmInvGroupOf, mmInvIsUnitised, mmInvIsInflow,
+  mmInr: mmInrOf, mmIso } =
   new Function('DCLogic', 'StreamableLogic', 'React',
-    src + '\n;return { Component, MM_TABS, MM_TAB_ALIAS, mmInvGroupOf, mmInvIsUnitised, mmInvIsInflow };')(
+    src + '\n;return { Component, MM_TABS, MM_TAB_ALIAS, mmInvGroupOf, mmInvIsUnitised, mmInvIsInflow, mmInr, mmIso };')(
     StubLogic, StubLogic, {});
 
 /* A book with a bank account and an investment account to hold a fund. */
@@ -335,5 +336,260 @@ console.log('\nClosed holdings leave the portfolio but not the record');
     c.state.db.investments.length === 2 && !!c.inv('i2'));
 }
 
-console.log('\n' + (fails ? fails + ' FAILURE(S)' : 'all checks passed'));
-process.exit(fails ? 1 : 0);
+/* ------------------------------------------------ the flow a person follows */
+
+/* One real scheme, in the shape the server returns. */
+const PPFAS = {
+  schemeCode: '122639', isin: 'INF879O01027', isinEffective: 'INF879O01027',
+  name: 'Parag Parikh Flexi Cap Fund', amc: 'PPFAS Mutual Fund',
+  plan: 'Direct Plan', option: 'Growth', nav: 89.5712, navDate: '2026-09-11', staleDays: 4
+};
+
+function withFundSearch(c, result) {
+  c.api = function (url) {
+    if (url.indexOf('/funds/search') >= 0) {
+      return Promise.resolve(result || { funds: [PPFAS], count: 1, catalogue: { stale: false } });
+    }
+    return Promise.resolve({});
+  };
+  return c;
+}
+
+(async () => {
+  console.log('\nAdding a mutual fund, the way the screen does it');
+  {
+    const c = withFundSearch(book());
+    c.openInvestment('add', {});
+    ok('the dialog opens', c.state.dlg && c.state.dlg.kind === 'investment');
+    ok('and defaults to paying from the bank', c.state.dlg.data.payFrom === 'bank',
+      c.state.dlg.data.payFrom);
+
+    /* Search, then take a scheme from the results. */
+    c.dlgSet({ fundQuery: 'parag parikh flexi cap' });
+    await c.invFundSearch();
+    ok('the search returns schemes', (c.state.dlg.data.fundResults || []).length === 1,
+      String((c.state.dlg.data.fundResults || []).length));
+
+    c.invPickFund(PPFAS);
+    const d = c.state.dlg.data;
+    ok('the scheme code is stored', d.schemeCode === '122639', d.schemeCode);
+    ok('the ISIN is stored', d.isin === 'INF879O01027', d.isin);
+    ok('the AMC is stored', d.amc === 'PPFAS Mutual Fund', d.amc);
+    ok('the plan is stored, so Direct cannot be confused with Regular',
+      d.plan === 'Direct Plan', d.plan);
+    ok('the option is stored', d.option === 'Growth', d.option);
+    ok('the latest NAV is filled in', d.currentNav === 89.5712, String(d.currentNav));
+    ok('and it is dated', d.navDate === '2026-09-11', d.navDate);
+    ok('the name is proposed from the scheme', /Parag Parikh/.test(d.name), d.name);
+    ok('the results list is cleared once one is chosen', d.fundResults === null);
+
+    /* Invest ₹50,000 without typing the units. */
+    c.dlgSet({ buyDate: '2026-09-15', buyAmount: 50000 });
+    ok('the dialog renders without error', !!c.dlgVals().hasDlg);
+    c.saveInvestment();
+
+    ok('the holding was created', c.state.db.investments.length === 1);
+    const inv = c.state.db.investments[0];
+    ok('it kept the scheme code', inv.schemeCode === '122639');
+    ok('a holding account was created for it', !!c.acct(inv.accountId), inv.accountId);
+    ok('and it is an investment account', c.acct(inv.accountId).type === 'investment',
+      c.acct(inv.accountId).type);
+    ok('named for what it holds', c.acct(inv.accountId).name === 'Mutual Funds',
+      c.acct(inv.accountId).name);
+
+    /* Units were worked out rather than typed — the brief is explicit. */
+    const st = c.invState(inv);
+    const expectUnits = Math.round((50000 / 89.5712) * 10000) / 10000;
+    ok('the units were calculated as amount ÷ NAV', st.units === expectUnits,
+      st.units + ' vs ' + expectUnits);
+    ok('₹50,000 is invested', st.invested === 50000, String(st.invested));
+    ok('and it is worth ₹50,000 at the NAV it was bought at',
+      Math.abs(st.value - 50000) < 1, String(st.value));
+
+    /* The accounting. */
+    const b = c.balances();
+    ok('the bank fell by ₹50,000', b.bank.balance === 450000, String(b.bank.balance));
+    ok('the holding account rose by ₹50,000',
+      b[inv.accountId].balance === 50000, String(b[inv.accountId].balance));
+    ok('the ledger entry is a transfer',
+      c.state.db.txns.length === 1 && c.state.db.txns[0].type === 'transfer',
+      c.state.db.txns[0] && c.state.db.txns[0].type);
+    ok('NOTHING was recorded as an expense',
+      c.state.db.txns.filter((t) => t.type === 'expense').length === 0);
+    ok('and net worth is unchanged by buying', Math.abs(c.netWorth() - 500000) < 1,
+      String(c.netWorth()));
+  }
+
+  console.log('\nWhen the NAV moves, the holding follows and the books do not');
+  {
+    const c = withFundSearch(book());
+    c.openInvestment('add', {});
+    c.invPickFund(PPFAS);
+    c.dlgSet({ buyDate: '2026-03-15', buyAmount: 50000 });
+    c.saveInvestment();
+    const inv = c.state.db.investments[0];
+
+    /* A later NAV, as a refresh would bring in. */
+    c.mutate((db) => { db.investments[0].currentNav = 98.5; db.investments[0].navDate = '2026-09-11'; });
+    const st = c.invState(c.inv(inv.id));
+    ok('the value rose with the NAV', st.value > 54000 && st.value < 55500, String(st.value));
+    ok('the gain is positive', st.gain > 4000, String(st.gain));
+    ok('the return is about 10%', st.returnPct > 9 && st.returnPct < 11, String(st.returnPct));
+    ok('XIRR is available and higher than the simple return, six months in',
+      st.xirr !== null && st.xirr > st.returnPct, 'xirr ' + st.xirr + ' vs ' + st.returnPct);
+    ok('the ledger still has exactly one entry', c.state.db.txns.length === 1);
+    ok('net worth now reflects the market', c.netWorth() > 504000, String(c.netWorth()));
+  }
+
+  console.log('\nAdding more, and taking some out');
+  {
+    const c = withFundSearch(book());
+    c.openInvestment('add', {});
+    c.invPickFund(PPFAS);
+    c.dlgSet({ buyDate: '2026-01-15', buyAmount: 50000 });
+    c.saveInvestment();
+    const inv = c.state.db.investments[0];
+    const unitsAfterBuy = c.invState(c.inv(inv.id)).units;
+
+    c.openInvTxn(c.inv(inv.id), 'buy');
+    c.dlgSet({ date: '2026-05-15', amount: 25000, nav: 90 });
+    c.saveInvTxn();
+    let st = c.invState(c.inv(inv.id));
+    ok('the second purchase adds to what is invested', st.invested === 75000, String(st.invested));
+    ok('and adds units', st.units > unitsAfterBuy, String(st.units));
+    ok('the bank fell again', c.balances().bank.balance === 425000, String(c.balances().bank.balance));
+    ok('still nothing counted as spending',
+      c.state.db.txns.filter((t) => t.type === 'expense').length === 0);
+
+    /* Withdraw some. */
+    c.openInvTxn(c.inv(inv.id), 'withdrawal');
+    c.dlgSet({ date: '2026-08-15', amount: 20000, nav: 100 });
+    c.saveInvTxn();
+    st = c.invState(c.inv(inv.id));
+    ok('the withdrawal reduced what is invested', st.invested === 55000, String(st.invested));
+    ok('and reduced the units', st.units < unitsAfterBuy + 277.8, String(st.units));
+    ok('the bank got the money back', c.balances().bank.balance === 445000,
+      String(c.balances().bank.balance));
+    ok('and it was not booked as income',
+      c.state.db.txns.filter((t) => t.type === 'income').length === 0);
+  }
+
+  console.log('\nThe screen refuses what should not happen');
+  {
+    const c = withFundSearch(book());
+    c.openInvestment('add', {});
+    c.invPickFund(PPFAS);
+    c.dlgSet({ buyAmount: 10000 });
+    c.saveInvestment();
+    const inv = c.state.db.investments[0];
+    const held = c.invState(c.inv(inv.id)).units;
+
+    /* Selling more units than are held. */
+    c.openInvTxn(c.inv(inv.id), 'withdrawal');
+    c.dlgSet({ date: '2026-09-15', amount: 999999, units: held + 100, nav: 90 });
+    const before = c.state.db.invTxns.length;
+    c.saveInvTxn();
+    ok('selling more units than are held is refused',
+      c.state.db.invTxns.length === before, String(c.state.db.invTxns.length - before));
+    ok('and the dialog stays open to be corrected', !!c.state.dlg);
+
+    /* A missing amount. */
+    c.dlgSet({ amount: 0, units: 0 });
+    c.saveInvTxn();
+    ok('a zero amount is refused', c.state.db.invTxns.length === before);
+  }
+
+  console.log('\nA failed fund lookup never invents a fund');
+  {
+    const c = book();
+    c.api = () => Promise.reject(Object.assign(new Error('offline'), { status: 0 }));
+    c.openInvestment('add', {});
+    c.dlgSet({ fundQuery: 'parag parikh' });
+    await c.invFundSearch();
+    const d = c.state.dlg.data;
+    ok('no schemes are produced', Array.isArray(d.fundResults) && d.fundResults.length === 0,
+      JSON.stringify(d.fundResults));
+    ok('the failure is explained', /could not reach/i.test(d.fundError), d.fundError);
+    ok('no NAV was invented', !d.currentNav, String(d.currentNav));
+    ok('and no scheme was attached', !d.schemeCode, String(d.schemeCode));
+
+    /* A search that simply matches nothing. */
+    const c2 = withFundSearch(book(), { funds: [], count: 0, catalogue: { stale: false } });
+    c2.openInvestment('add', {});
+    c2.dlgSet({ fundQuery: 'zzzz nonexistent fund' });
+    await c2.invFundSearch();
+    ok('an empty result says so', /no scheme matched/i.test(c2.state.dlg.data.fundError),
+      c2.state.dlg.data.fundError);
+
+    /* A stale catalogue is disclosed rather than passed off as current. */
+    const c3 = withFundSearch(book(), { funds: [PPFAS], count: 1, catalogue: { stale: true } });
+    c3.openInvestment('add', {});
+    c3.dlgSet({ fundQuery: 'parag' });
+    await c3.invFundSearch();
+    ok('a stale catalogue is disclosed',
+      /last downloaded/i.test(c3.state.dlg.data.fundError), c3.state.dlg.data.fundError);
+  }
+
+  console.log('\nA deposit needs no fund and no units');
+  {
+    const c = book();
+    c.openInvestment('add', {});
+    c.dlgSet({
+      name: 'HDFC Fixed Deposit', type: 'Fixed Deposit', institution: 'HDFC Bank',
+      currentValue: 107000, rate: 7, maturityDate: '2027-09-15',
+      buyDate: '2026-09-15', buyAmount: 100000
+    });
+    ok('the dialog renders for a deposit', !!c.dlgVals().hasDlg);
+    c.saveInvestment();
+
+    const inv = c.state.db.investments[0];
+    ok('it was created', !!inv && inv.name === 'HDFC Fixed Deposit');
+    ok('into a fixed-deposit account', c.acct(inv.accountId).type === 'fd',
+      c.acct(inv.accountId).type);
+    const st = c.invState(inv);
+    ok('with no units', st.units === 0, String(st.units));
+    ok('₹1,00,000 invested', st.invested === 100000, String(st.invested));
+    ok('valued at what was entered', st.value === 107000, String(st.value));
+    ok('showing a ₹7,000 gain', st.gain === 7000, String(st.gain));
+    ok('the bank paid for it', c.balances().bank.balance === 400000, String(c.balances().bank.balance));
+    ok('and it was not an expense', c.state.db.txns.filter((t) => t.type === 'expense').length === 0);
+
+    const sum = c.invMonthAndMaturity();
+    ok('the maturity is picked up', sum.nextMaturity && sum.nextMaturity.date === '2027-09-15',
+      JSON.stringify(sum.nextMaturity));
+  }
+
+  console.log('\nThe Investments screen renders');
+  {
+    const c = withFundSearch(book());
+    c.state.tab = 'Investments';
+    let v = c.investVals();
+    ok('it renders when empty', v.isTable === true && v.tableEmpty === true);
+    ok('and invites a first holding', /add investment/i.test(v.emptyBtn), v.emptyBtn);
+    ok('every panel has a value', v.panels.every((p) => p.value !== undefined && p.value !== ''));
+    ok('an empty portfolio shows a dash for return, not 0%',
+      v.panels.find((p) => p.label === 'Overall return').value === '—');
+
+    c.openInvestment('add', {});
+    c.invPickFund(PPFAS);
+    c.dlgSet({ buyDate: '2026-03-15', buyAmount: 50000 });
+    c.saveInvestment();
+    c.state.tab = 'Investments';
+    v = c.investVals();
+    ok('the holding appears as a row', v.tableRows.length === 1, String(v.tableRows.length));
+    ok('with a cell for every column',
+      v.tableRows[0].cells.length === v.tableCols.length,
+      v.tableRows[0].cells.length + ' vs ' + v.tableCols.length);
+    ok('the panels total what was invested',
+      v.panels[0].value === mmInrOf(50000), v.panels[0].value);
+    ok('no panel shows NaN or undefined',
+      v.panels.every((p) => !/NaN|undefined|Infinity/.test(String(p.value) + String(p.note))),
+      JSON.stringify(v.panels.map((p) => p.value)));
+    ok('and no row cell does either',
+      v.tableRows[0].cells.every((cell) => !/NaN|undefined|Infinity/.test(String(cell.text || ''))),
+      JSON.stringify(v.tableRows[0].cells.map((x) => x.text)));
+  }
+
+  console.log('\n' + (fails ? fails + ' FAILURE(S)' : 'all checks passed'));
+  process.exit(fails ? 1 : 0);
+})().catch((e) => { console.error(e); process.exit(1); });
