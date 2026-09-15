@@ -7,7 +7,7 @@
     "node": ">=20"
   },
   "scripts": {
-    "test": "node test/logic.test.js && node test/funds.test.js && node test/returns.test.js && node test/investments.test.js && node test/cards.test.js && node test/import.test.js && node test/crypto.test.js && node test/csp.test.js && node test/pool.test.js && node test/cookie.test.js && node test/reset.test.js && node test/signup.test.js && node test/api.test.js",
+    "test": "node test/logic.test.js && node test/funds.test.js && node test/returns.test.js && node test/investments.test.js && node test/cards.test.js && node test/import.test.js && node test/crypto.test.js && node test/csp.test.js && node test/responsive.test.js && node test/pool.test.js && node test/cookie.test.js && node test/reset.test.js && node test/signup.test.js && node test/api.test.js",
     "test:logic": "node test/logic.test.js",
     "test:pool": "node test/pool.test.js",
     "test:api": "node test/api.test.js",
@@ -22,7 +22,8 @@
     "test:csp": "node test/csp.test.js",
     "test:funds": "node test/funds.test.js",
     "test:returns": "node test/returns.test.js",
-    "test:investments": "node test/investments.test.js"
+    "test:investments": "node test/investments.test.js",
+    "test:responsive": "node test/responsive.test.js"
   },
   "dependencies": {
     "@neon/config": "^1.4.0",

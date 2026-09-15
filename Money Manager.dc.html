@@ -305,6 +305,87 @@
     [data-app] { display: none !important; }
     [data-print] { display: block !important; }
   }
+
+  /* ---------------------------------------------------------------------
+     NARROW SCREENS
+
+     The desktop layout is a three-part window: a title bar, a tab strip
+     under it, and a summary panel beside the content. On a phone none of
+     that fits, so the tab strip becomes a bottom bar — thumbs reach the
+     bottom of a phone, not the top — and the summary panel steps aside
+     rather than squeezing the content it is meant to explain.
+
+     Everything here is driven by data- attributes because every other
+     style in this file is inline, and inline styles can only be overridden
+     by !important. Nothing below changes behaviour: it is the same markup,
+     the same bindings, laid out for a hand instead of a desk.
+     --------------------------------------------------------------------- */
+  @media (max-width: 760px) {
+    [data-app] {
+      height: 100vh;
+      height: 100dvh;          /* so the browser's own chrome cannot clip it */
+      min-height: 0 !important;
+    }
+
+    /* The title bar wraps instead of overflowing, and the search box takes
+       a line of its own so it stays usable. */
+    [data-chrome] {
+      height: auto !important;
+      min-height: 28px;
+      flex-wrap: wrap;
+      row-gap: 4px;
+      padding: 4px 6px !important;
+    }
+    [data-chrome-search] { flex: 1 1 100%; width: auto !important; }
+
+    /* The tab strip becomes the bottom navigation. It scrolls sideways,
+       because thirteen tabs will not fit on any phone and hiding some of
+       them behind a menu hides the app from itself. */
+    [data-tabs] {
+      position: fixed;
+      left: 0; right: 0; bottom: 0;
+      z-index: 60;
+      height: auto !important;
+      align-items: stretch !important;
+      padding: 5px 6px !important;
+      gap: 5px !important;
+      overflow-x: auto;
+      overflow-y: hidden;
+      -webkit-overflow-scrolling: touch;
+      border-top: 1px solid var(--c-9db8d2);
+      border-bottom: none !important;
+      box-shadow: 0 -3px 10px rgba(12, 32, 54, .16);
+      padding-bottom: calc(5px + env(safe-area-inset-bottom)) !important;
+    }
+    [data-tabs] button {
+      flex: none;
+      top: 0 !important;
+      height: 34px !important;
+      padding: 0 14px !important;
+      border-radius: 3px !important;
+      font-size: 12px !important;
+      white-space: nowrap;
+    }
+
+    /* The content gets the whole width, and clears the bottom bar. */
+    [data-main] {
+      flex-direction: column !important;
+      padding-bottom: calc(46px + env(safe-area-inset-bottom));
+    }
+    [data-left] { display: none !important; }
+
+    /* A dialog sized for a desktop window must not run off the screen. */
+    [data-dialog] {
+      width: auto !important;
+      max-width: calc(100vw - 16px) !important;
+      max-height: calc(100vh - 24px);
+      max-height: calc(100dvh - 24px);
+      overflow-y: auto;
+    }
+    /* Wide tables need no rule of their own: the table body already scrolls
+       in both axes, and its header sits inside that same scroller with
+       min-width:max-content, so the two stay lined up. */
+  }
 </style>
 </helmet>
 <div data-print style="display:none;padding:18px;font-family:'Segoe UI',Tahoma,sans-serif;font-size:11pt;color:#000">
@@ -344,12 +425,12 @@
 <div data-app style="display:flex;flex-direction:column;height:100vh;min-height:560px;background:var(--c-eef3f9);font-family:'Segoe UI',Tahoma,Geneva,sans-serif;font-size:12px;color:var(--c-16232f);overflow:hidden">
 
   <sc-if value="{{ signedIn }}" hint-placeholder-val="{{ true }}">
-  <div style="display:flex;align-items:center;gap:8px;height:28px;padding:0 8px;flex:none;background:linear-gradient(var(--c-5b8cbf),var(--c-2b5f96));border-bottom:1px solid var(--c-1c4470);color:var(--c-onaccent)">
+  <div data-chrome style="display:flex;align-items:center;gap:8px;height:28px;padding:0 8px;flex:none;background:linear-gradient(var(--c-5b8cbf),var(--c-2b5f96));border-bottom:1px solid var(--c-1c4470);color:var(--c-onaccent)">
     <div style="width:16px;height:16px;border-radius:2px;background:var(--c-f3f8fd);color:var(--c-1c4470);display:grid;place-items:center;font-size:11px;font-weight:700">₹</div>
     <span style="font-weight:600;letter-spacing:.2px">Money Manager</span>
     <span style="opacity:.75;font-size:11px">{{ periodLabel }}</span>
     <div style="flex:1"></div>
-    <input placeholder="Search everything  (Ctrl+F)" aria-label="Search transactions" value="{{ q }}" onChange="{{ onSearch }}" ref="{{ searchRef }}" style="width:220px;height:19px;padding:0 6px;border:1px solid var(--c-1c4470);background:var(--c-surface);border-radius:2px;font-size:11px" />
+    <input data-chrome-search placeholder="Search everything  (Ctrl+F)" aria-label="Search transactions" value="{{ q }}" onChange="{{ onSearch }}" ref="{{ searchRef }}" style="width:220px;height:19px;padding:0 6px;border:1px solid var(--c-1c4470);background:var(--c-surface);border-radius:2px;font-size:11px" />
     <sc-if value="{{ canUndo }}">
       <button onClick="{{ doUndo }}" title="{{ undoLabel }}  (Ctrl+Z)" aria-label="Undo" style="height:19px;padding:0 8px;border:1px solid var(--c-1c4470);background:linear-gradient(var(--c-eaf2fa),var(--c-cfe0f0));border-radius:2px;cursor:pointer;font-size:11px">↶ Undo</button>
     </sc-if>
@@ -364,16 +445,16 @@
     <button onClick="{{ doSignOut }}" title="Sign out and return to the sign-in screen" style="height:19px;padding:0 8px;border:1px solid var(--c-1c4470);background:linear-gradient(var(--c-eaf2fa),var(--c-cfe0f0));border-radius:2px;cursor:pointer;font-size:11px">Sign out</button>
   </div>
 
-  <div style="display:flex;align-items:flex-end;gap:2px;height:27px;padding:4px 6px 0;flex:none;background:linear-gradient(var(--c-e2ecf7),var(--c-cfe0f0));border-bottom:1px solid var(--c-9db8d2)">
+  <div data-tabs role="tablist" aria-label="Sections" style="display:flex;align-items:flex-end;gap:2px;height:27px;padding:4px 6px 0;flex:none;background:linear-gradient(var(--c-e2ecf7),var(--c-cfe0f0));border-bottom:1px solid var(--c-9db8d2)">
     <sc-for list="{{ tabs }}" as="t" hint-placeholder-count="9">
       <button onClick="{{ t.go }}" style="{{ t.style }}">{{ t.label }}</button>
     </sc-for>
   </div>
 
-  <div style="display:flex;flex:1;min-height:0">
+  <div data-main style="display:flex;flex:1;min-height:0">
 
     <sc-if value="{{ showLeft }}" hint-placeholder-val="{{ true }}">
-      <div style="{{ leftStyle }}">
+      <div data-left style="{{ leftStyle }}">
         <div style="border:1px solid var(--c-a8c0d8);background:var(--c-surface);margin:6px 6px 0">
           <div style="display:flex;align-items:center;padding:3px 6px;background:linear-gradient(var(--c-eaf2fa),var(--c-dbe8f5));border-bottom:1px solid var(--c-bcd0e4);font-weight:600;color:var(--c-1c4470)">
             <span style="flex:1">Summary</span>
@@ -435,11 +516,11 @@
           </div>
         </div>
       </div>
-      <div onMouseDown="{{ startResize }}" title="Drag to resize" style="width:5px;flex:none;cursor:col-resize;background:linear-gradient(90deg,var(--c-dce7f2),var(--c-c6d8e9))"></div>
+      <div data-left onMouseDown="{{ startResize }}" title="Drag to resize" style="width:5px;flex:none;cursor:col-resize;background:linear-gradient(90deg,var(--c-dce7f2),var(--c-c6d8e9))"></div>
     </sc-if>
 
     <sc-if value="{{ leftClosed }}">
-      <div style="width:16px;flex:none;background:linear-gradient(90deg,var(--c-dce7f2),var(--c-c6d8e9));border-right:1px solid var(--c-a8c0d8);display:flex;align-items:flex-start;justify-content:center;padding-top:8px">
+      <div data-left style="width:16px;flex:none;background:linear-gradient(90deg,var(--c-dce7f2),var(--c-c6d8e9));border-right:1px solid var(--c-a8c0d8);display:flex;align-items:flex-start;justify-content:center;padding-top:8px">
         <button onClick="{{ toggleLeft }}" title="Show summary panel" style="width:14px;height:40px;border:1px solid var(--c-a8c0d8);background:var(--c-f3f8fd);cursor:pointer;font-size:9px;padding:0">»</button>
       </div>
     </sc-if>
@@ -1273,7 +1354,7 @@
 
   <sc-if value="{{ hasDlg }}">
     <div onClick="{{ closeDlg }}" style="position:fixed;inset:0;background:rgba(20,40,64,.34);display:flex;align-items:flex-start;justify-content:center;padding:44px 12px;overflow:auto;z-index:40">
-      <div onClick="{{ stop }}" style="{{ dlgStyle }}">
+      <div data-dialog onClick="{{ stop }}" style="{{ dlgStyle }}">
         <div style="display:flex;align-items:center;height:26px;padding:0 8px;background:linear-gradient(var(--c-5b8cbf),var(--c-2b5f96));color:var(--c-onaccent);border-bottom:1px solid var(--c-1c4470)">
           <span style="flex:1;font-weight:600">{{ dlgTitle }}</span>
           <button onClick="{{ closeDlg }}" style="width:19px;height:18px;border:1px solid var(--c-1c4470);background:linear-gradient(var(--c-f2b0aa),var(--c-c9564c));color:var(--c-onaccent);cursor:pointer;border-radius:2px;padding:0;line-height:1">✕</button>
