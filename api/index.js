@@ -708,6 +708,14 @@ function rawBody(req) {
     req.on('error', reject);
   });
 }
+/* Gzip expands, and a small compressed body can become an enormous one — a
+   few hundred kilobytes of zeros is gigabytes decompressed. rawBody caps what
+   arrives; this caps what it can turn into. Without it a caller who is not
+   even signed in can exhaust the function's memory, because register and
+   login read their bodies before anyone has been authenticated. */
+const MAX_INFLATED = 64 * 1024 * 1024;
+const gunzipCapped = (buf) => zlib.gunzipSync(buf, { maxOutputLength: MAX_INFLATED });
+
 async function readJsonBody(req) {
   const encoded = String(req.headers['x-mm-encoding'] || '').toLowerCase() === 'gzip';
   let raw = req.body;
@@ -715,12 +723,12 @@ async function readJsonBody(req) {
   if (raw == null || raw === '' || (Buffer.isBuffer(raw) && !raw.length)) return null;
 
   if (Buffer.isBuffer(raw)) {
-    const buf = encoded ? zlib.gunzipSync(raw) : raw;
+    const buf = encoded ? gunzipCapped(raw) : raw;
     return JSON.parse(buf.toString('utf8'));
   }
   if (typeof raw === 'string') {
     /* A parsed-as-text gzip body arrives base64-encoded from our client. */
-    if (encoded) return JSON.parse(zlib.gunzipSync(Buffer.from(raw, 'base64')).toString('utf8'));
+    if (encoded) return JSON.parse(gunzipCapped(Buffer.from(raw, 'base64')).toString('utf8'));
     return JSON.parse(raw);
   }
   return raw;                                     /* already-parsed JSON object */
@@ -2686,7 +2694,7 @@ async function handleRequest(req, res) {
       if (route === 'state' && method === 'PUT') {
         let body;
         try { body = (await readJsonBody(req)) || {}; }
-        catch (e) { return send(res, 400, { error: 'The save could not be read. Nothing was changed.', detail: String(e.message) }); }
+        catch (e) { return send(res, 400, { error: 'The save could not be read. Nothing was changed.', detail: scrub(e && e.message) }); }
         const data = body.data;
         const shape = documentProblem(data);
         if (shape) return send(res, 422, { error: shape, code: 'bad_document' });
@@ -2856,7 +2864,7 @@ async function handleRequest(req, res) {
         let body;
         try { body = (await readJsonBody(req)) || {}; }
         catch (e) {
-          return send(res, 400, { error: 'The backup could not be read. Nothing was saved.', detail: String(e.message) });
+          return send(res, 400, { error: 'The backup could not be read. Nothing was saved.', detail: scrub(e && e.message) });
         }
         const payload = body.payload;
         const bad = documentProblem(payload);

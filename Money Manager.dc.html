@@ -1755,11 +1755,30 @@ function mmCardCycle(stmtDayRaw, dueDayRaw, asOf, dueNextMonth) {
     graceDays: mmDaysBetween(nextStmt, dueFor(m + 1))
   };
 }
-function mmAddM(s, n) { var d = mmParse(s); d.setMonth(d.getMonth() + n); return mmIso(d); }
+/* Add months, clamping to the end of the target month. setMonth() alone
+   overflows — 31 Jan + 1 month becomes 3 March, because 31 February rolls
+   forward — which silently skips a month in loan schedules, recurring dates
+   and NAV period windows. nextDate() has always clamped; this now matches it. */
+function mmAddM(s, n) {
+  var d = mmParse(s), dom = d.getDate();
+  var y = d.getFullYear(), m = d.getMonth() + (parseInt(n, 10) || 0);
+  var last = new Date(y, m + 1, 0).getDate();
+  return mmIso(new Date(y, m, Math.min(dom, last)));
+}
 function mmInr(n, noSym) {
   var v = +n; if (!isFinite(v)) v = 0;
   var neg = v < 0; v = Math.abs(v);
-  var s = v.toFixed(2), parts = s.split('.'), i = parts[0];
+  var s = v.toFixed(2);
+  /* Past about 1e21 toFixed switches to exponential and has no decimal point
+     at all, which used to render as "1e,+21.undefined". No real amount gets
+     there, but a corrupt import should not be able to put that on screen. */
+  if (s.indexOf('e') >= 0) {
+    s = v.toLocaleString('en-US',
+      { useGrouping: false, minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  }
+  var parts = s.split('.');
+  if (parts.length < 2) parts[1] = '00';
+  var i = parts[0];
   var last3 = i.slice(-3), rest = i.slice(0, -3);
   if (rest) rest = rest.replace(/\B(?=(\d{2})+(?!\d))/g, ',') + ',';
   return (neg ? '-' : '') + (noSym ? '' : '₹') + rest + last3 + '.' + parts[1];
@@ -4882,9 +4901,15 @@ class Component extends DCLogic {
     return 'display:flex;min-width:max-content;align-items:stretch;height:30px;border-bottom:1px solid var(--c-eef2f7);cursor:default;background:' + (sel ? 'var(--c-cfe4f7)' : (i % 2 ? 'var(--c-fafcff)' : 'var(--c-surface)'));
   }
   emi(p, rate, n) {
+    n = +n || 0;
+    /* No tenure means no instalment. Without this the formula divides by
+       (1+r)^0 - 1, which is zero, and returns Infinity — which happens while
+       the tenure box is empty as you type in the loan dialog. */
+    if (n <= 0) return 0;
     var r = (+rate || 0) / 1200;
-    if (!r) return n ? p / n : 0;
-    return p * r * Math.pow(1 + r, n) / (Math.pow(1 + r, n) - 1);
+    if (!r) return p / n;
+    var v = p * r * Math.pow(1 + r, n) / (Math.pow(1 + r, n) - 1);
+    return isFinite(v) ? v : 0;
   }
   schedule(loan) {
     var n = +loan.tenure || 0, emi = this.emi(+loan.principal || 0, loan.rate, n), r = (+loan.rate || 0) / 1200;
@@ -6124,9 +6149,24 @@ class Component extends DCLogic {
   /* Post one occurrence (the earliest pending one, or a named date). */
   postRecur(r, onlyDate) {
     var self = this;
-    var pending = this.recurPending(r);
-    var dates = onlyDate ? [onlyDate] : (pending.length ? [pending[0]] : []);
-    if (!dates.length) { this.flash('Nothing is due for “' + r.desc + '”.'); return; }
+    /* Read the entry back from state before doing anything. The object the
+       row handed over was cloned when that row was drawn, and mutate() clones
+       again on every change — so a second click, fired before the screen has
+       caught up, still carries the old copy and cannot see what the first one
+       posted. Without this, double-clicking Post books the same instalment
+       twice. */
+    var live = (this.state.db.recurring || []).filter(function (x) { return x.id === r.id; })[0];
+    if (!live) { this.flash('That recurring entry is no longer there.'); return; }
+    var pending = this.recurPending(live);
+    var dates = (onlyDate ? [onlyDate] : (pending.length ? [pending[0]] : []))
+      .filter(function (d) { return !self.recurDone(live, d); });
+    if (!dates.length) {
+      this.flash(onlyDate
+        ? 'That instalment of “' + live.desc + '” has already been posted.'
+        : 'Nothing is due for “' + live.desc + '”.');
+      return;
+    }
+    r = live;
     var bad = this.validateTxn(this.recurTxn(r, dates[0]));
     if (bad) { this.flash('“' + r.desc + '” cannot be posted: ' + bad); return; }
     this.pushUndo('posting of “' + r.desc + '”', ['txns', 'recurring']);
@@ -9504,7 +9544,7 @@ class Component extends DCLogic {
     var acctIds = {}, catIds = {};
     db.accounts.forEach(function (a) { acctIds[a.id] = a; });
     db.categories.forEach(function (c) { catIds[c.id] = c; });
-    var noAcct = 0, noCat = 0, badAmt = 0, badDate = 0, selfTransfer = 0, noDest = 0, wrongType = 0;
+    var noAcct = 0, noCat = 0, badAmt = 0, badDate = 0, selfTransfer = 0, noDest = 0, wrongType = 0, goneCat = 0;
     db.txns.forEach(function (t) {
       if (!acctIds[t.accountId]) noAcct++;
       if (!isFinite(+t.amount) || +t.amount <= 0) badAmt++;
@@ -9514,7 +9554,11 @@ class Component extends DCLogic {
         else if (t.toAccountId === t.accountId) selfTransfer++;
       } else {
         if (!t.categoryId) noCat++;
-        else if (catIds[t.categoryId] && catIds[t.categoryId].type !== t.type) wrongType++;
+        /* A category that is no longer there used to fall through both arms of
+           this and be reported as nothing at all, which is the one orphan this
+           check exists to find. */
+        else if (!catIds[t.categoryId]) goneCat++;
+        else if (catIds[t.categoryId].type !== t.type) wrongType++;
       }
     });
     if (noAcct) issues.push(noAcct + ' transaction(s) point at an account that no longer exists');
@@ -9524,6 +9568,7 @@ class Component extends DCLogic {
     if (badDate) issues.push(badDate + ' transaction(s) have an unreadable date');
     if (wrongType) issues.push(wrongType + ' transaction(s) use a category from the other side of the books');
     if (noCat) issues.push(noCat + ' income/expense transaction(s) are uncategorised');
+    if (goneCat) issues.push(goneCat + ' transaction(s) point at a category that no longer exists');
     db.budgets.forEach(function (b) { if (!catIds[b.categoryId]) issues.push('a budget points at a deleted category'); });
     /* Transfers must net to zero across all accounts — a useful cross-check. */
     var tin = 0, tout = 0;
